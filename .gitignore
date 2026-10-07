@@ -3,3 +3,7 @@ node_modules/
 server/uploads/
 client/dist/
 *.log
+
+.vercel
+.env*
+!server/.env.example
