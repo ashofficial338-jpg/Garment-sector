@@ -1,11 +1,10 @@
 /** Document management: upload, versions, preview/download, soft delete/restore – linked to Job. */
 import express from 'express';
-import path from 'path';
-import fs from 'fs';
 import mongoose from 'mongoose';
 import { DocumentFile } from '../models/Document.js';
 import { models } from '../modules/builder.js';
-import { upload, UPLOAD_ROOT } from '../middleware/upload.js';
+import { upload } from '../middleware/upload.js';
+import { saveFile, openFile, fileExists, removeFile } from '../services/fileStore.js';
 import { permit, adminOnly } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
@@ -17,7 +16,7 @@ import { DOCUMENT_TYPES } from '../../../shared/constants.js';
 
 const r = express.Router();
 
-const removeFile = (f) => (f ? fs.promises.unlink(path.join(UPLOAD_ROOT, path.basename(f))).catch(() => {}) : null);
+const store = (req) => saveFile(req.file.buffer, { filename: req.file.originalname, contentType: req.file.mimetype, metadata: { uploadedBy: String(req.user._id) } });
 
 r.get('/', permit('documents', 'view'), asyncHandler(async (req, res) => {
   const f = { isDeleted: req.perms.isAdmin && req.query.deleted === 'true' };
@@ -35,6 +34,8 @@ r.get('/', permit('documents', 'view'), asyncHandler(async (req, res) => {
 
 r.post('/', permit('documents', 'create'), upload.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) throw ApiError.badRequest('File is required');
+  let fileId;
+  let doc;
   try {
     const { job: jobKey, docType, title, department, note } = req.body;
     if (!DOCUMENT_TYPES.includes(docType)) throw ApiError.badRequest('Invalid document type');
@@ -43,17 +44,18 @@ r.post('/', permit('documents', 'create'), upload.single('file'), asyncHandler(a
       job = mongoose.isValidObjectId(jobKey) ? await models.orders.findById(jobKey).lean() : await models.orders.findOne({ jobNo: jobKey }).lean();
       if (!job) throw ApiError.badRequest('Job not found');
     }
-    const doc = await DocumentFile.create({
+    fileId = await store(req);
+    doc = await DocumentFile.create({
       refNo: await nextRefNo('DOC'), job: job?._id, jobNo: job?.jobNo,
       department: department || req.user.department, docType, title: title || req.file.originalname,
-      versions: [{ version: 1, fileName: req.file.filename, originalName: req.file.originalname, mimeType: req.file.mimetype, size: req.file.size, note, uploadedBy: req.user._id, uploadedByName: req.user.name }],
+      versions: [{ version: 1, fileName: fileId, originalName: req.file.originalname, mimeType: req.file.mimetype, size: req.file.size, note, uploadedBy: req.user._id, uploadedByName: req.user.name }],
       currentVersion: 1, createdBy: req.user._id, createdByName: req.user.name,
     });
     await audit(req, { action: 'UPLOAD', module: 'documents', record: doc, jobNo: doc.jobNo, message: `${req.user.name} uploaded ${docType} "${doc.title}"` });
     if (job) await refreshJob(job._id);
     res.status(201).json(doc);
   } catch (e) {
-    await removeFile(req.file?.filename);
+    if (fileId && !doc) await removeFile(fileId); // orphaned upload only
     throw e;
   }
 }));
@@ -62,9 +64,10 @@ r.post('/', permit('documents', 'create'), upload.single('file'), asyncHandler(a
 r.post('/:id/versions', permit('documents', 'edit'), upload.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) throw ApiError.badRequest('File is required');
   const doc = await DocumentFile.findById(req.params.id);
-  if (!doc || doc.isDeleted) { await removeFile(req.file.filename); throw ApiError.notFound(); }
+  if (!doc || doc.isDeleted) throw ApiError.notFound();
   const version = doc.currentVersion + 1;
-  doc.versions.push({ version, fileName: req.file.filename, originalName: req.file.originalname, mimeType: req.file.mimetype, size: req.file.size, note: req.body.note, uploadedBy: req.user._id, uploadedByName: req.user.name });
+  const fileId = await store(req);
+  doc.versions.push({ version, fileName: fileId, originalName: req.file.originalname, mimeType: req.file.mimetype, size: req.file.size, note: req.body.note, uploadedBy: req.user._id, uploadedByName: req.user.name });
   doc.currentVersion = version;
   await doc.save();
   await audit(req, { action: 'VERSION', module: 'documents', record: doc, changes: [{ field: 'version', old: version - 1, new: version }], message: `${req.user.name} uploaded version ${version} of "${doc.title}"` });
@@ -77,13 +80,12 @@ r.get('/:id/file', permit('documents', 'view'), asyncHandler(async (req, res) =>
   const v = Number(req.query.version) || doc.currentVersion;
   const ver = doc.versions.find((x) => x.version === v);
   if (!ver) throw ApiError.notFound('Version not found');
-  const file = path.join(UPLOAD_ROOT, path.basename(ver.fileName));
-  if (!fs.existsSync(file)) throw ApiError.notFound('File missing on server');
+  if (!(await fileExists(ver.fileName))) throw ApiError.notFound('File missing on server');
   res.setHeader('Content-Type', ver.mimeType || 'application/octet-stream');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   const disp = req.query.download === '1' ? 'attachment' : 'inline';
   res.setHeader('Content-Disposition', `${disp}; filename="${encodeURIComponent(ver.originalName)}"`);
-  fs.createReadStream(file).pipe(res);
+  openFile(ver.fileName).on('error', () => res.destroy()).pipe(res);
 }));
 
 r.delete('/:id', permit('documents', 'delete'), asyncHandler(async (req, res) => {

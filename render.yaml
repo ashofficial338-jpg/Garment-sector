@@ -1,0 +1,42 @@
+# Render Blueprint – Garment ERP API (backend)
+# Dashboard → New → Blueprint → select this repo. Values marked sync:false are entered by you in the dashboard.
+services:
+  - type: web
+    name: garment-erp-api
+    runtime: node
+    plan: free            # free instances sleep after 15 min idle (≈50 s cold start); use "starter" for always-on
+    region: singapore     # keep the MongoDB Atlas cluster in the same region (AWS ap-southeast-1)
+    branch: main
+    buildCommand: npm --prefix server ci --omit=dev
+    startCommand: npm --prefix server start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      - key: MONGO_URI            # MongoDB Atlas connection string
+        sync: false
+      - key: CLIENT_ORIGIN        # e.g. https://garment-erp.vercel.app (comma-separate several)
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: ACCESS_TOKEN_TTL
+        value: 15m
+      - key: REFRESH_TOKEN_TTL_DAYS
+        value: "7"
+      - key: ADMIN_EMAIL          # initial administrator (created only if no admin exists)
+        value: ashofficial338@gmail.com
+      - key: ADMIN_PASSWORD       # strong one-time password – forced change at first login
+        sync: false
+      - key: ADMIN_NAME
+        value: System Administrator
+      - key: JOB_PREFIX
+        value: GAR
+      - key: MAX_UPLOAD_MB
+        value: "15"
+      - key: TRUST_PROXY          # browser → Vercel rewrite → Render proxy → app
+        value: "2"

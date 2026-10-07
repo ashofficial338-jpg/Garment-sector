@@ -1,6 +1,11 @@
 import 'dotenv/config';
 
 const required = ['MONGO_URI', 'JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET'];
+if (process.env.NODE_ENV === 'production') {
+  for (const k of ['JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET']) {
+    if ((process.env[k] || '').length < 32) throw new Error(`${k} must be at least 32 characters in production`);
+  }
+}
 for (const k of required) {
   if (!process.env[k]) throw new Error(`Missing required environment variable ${k}`);
 }
@@ -21,6 +26,6 @@ export const env = {
     name: process.env.ADMIN_NAME || 'System Administrator',
   },
   jobPrefix: process.env.JOB_PREFIX || 'GAR',
-  uploadDir: process.env.UPLOAD_DIR || 'uploads',
+  trustProxy: Number(process.env.TRUST_PROXY ?? 1),
   maxUploadMb: Number(process.env.MAX_UPLOAD_MB) || 15,
 };

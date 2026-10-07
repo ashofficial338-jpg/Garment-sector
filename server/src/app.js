@@ -23,7 +23,8 @@ function sanitizeInput(obj) {
 
 export function createApp() {
   const app = express();
-  app.set('trust proxy', 1);
+  // Number of reverse proxies in front of the app (Render = 1; Vercel rewrite → Render = 2)
+  app.set('trust proxy', env.trustProxy);
   app.disable('x-powered-by');
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'same-site' } }));
   app.use(cors({ origin: env.clientOrigin, credentials: true }));

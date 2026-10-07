@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import { authenticate, requirePasswordFresh } from '../middleware/auth.js';
 import { MODULE_LIST } from '../../../shared/modules/index.js';
 import { crudRouter } from '../modules/crudRouter.js';
@@ -17,7 +18,11 @@ import { getSetting } from '../services/settings.js';
 
 const api = express.Router();
 
-api.get('/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+// Health check for Render / uptime monitors – fails when the database is unreachable
+api.get('/health', (_req, res) => {
+  const db = mongoose.connection.readyState === 1;
+  res.status(db ? 200 : 503).json({ ok: db, db: db ? 'connected' : 'disconnected', time: new Date().toISOString() });
+});
 api.use('/auth', authRoutes);
 
 // Everything below requires a valid session and a non-temporary password

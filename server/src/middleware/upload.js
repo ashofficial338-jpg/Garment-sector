@@ -1,11 +1,6 @@
 import multer from 'multer';
 import path from 'path';
-import fs from 'fs';
-import crypto from 'crypto';
 import { env } from '../config/env.js';
-
-export const UPLOAD_ROOT = path.resolve(process.cwd(), env.uploadDir);
-fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
 
 const ALLOWED = {
   '.pdf': ['application/pdf'],
@@ -18,12 +13,9 @@ const ALLOWED = {
   '.txt': ['text/plain'],
 };
 
+/** Files are held in memory (size-limited) and then streamed into GridFS – nothing touches the local disk. */
 export const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, UPLOAD_ROOT),
-    // random server-side names – never trust client file names on disk
-    filename: (_req, file, cb) => cb(null, `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${path.extname(file.originalname).toLowerCase()}`),
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: env.maxUploadMb * 1024 * 1024, files: 1 },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();

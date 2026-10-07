@@ -2,7 +2,7 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { env } from '../config/env.js';
 import { User } from '../models/User.js';
 import { Session } from '../models/Session.js';
@@ -16,7 +16,8 @@ const r = express.Router();
 const COOKIE = 'gerp_rt';
 const hash = (t) => crypto.createHash('sha256').update(t).digest('hex');
 
-const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { message: 'Too many login attempts, try again later' } });
+// keyed by client IP + email so users behind one office NAT don't block each other
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, keyGenerator: (req) => `${ipKeyGenerator(req.ip)}|${String(req.body?.email || '').toLowerCase()}`, standardHeaders: true, legacyHeaders: false, message: { message: 'Too many login attempts, try again later' } });
 
 export const PASSWORD_RULE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 export const PASSWORD_HINT = 'Password must be at least 8 characters with upper & lower case letters, a number and a symbol';

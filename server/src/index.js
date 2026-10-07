@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { env } from './config/env.js';
 import { connectDb } from './config/db.js';
 import { createApp } from './app.js';
@@ -18,7 +19,17 @@ async function main() {
     }
     throw e;
   });
-  if (process.env.DISABLE_SCHEDULER !== 'true') startScheduler(30);
+  const timer = process.env.DISABLE_SCHEDULER !== 'true' ? startScheduler(30) : null;
+
+  // Graceful shutdown (Render / containers send SIGTERM on deploy)
+  const shutdown = (sig) => {
+    logger.info(`${sig} received – shutting down`);
+    clearInterval(timer);
+    server.close(() => mongoose.disconnect().finally(() => process.exit(0)));
+    setTimeout(() => process.exit(0), 10000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 main().catch((e) => {

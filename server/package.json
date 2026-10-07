@@ -22,5 +22,8 @@
     "mongoose": "^8.24.5",
     "morgan": "^1.12.1",
     "multer": "^2.4.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
