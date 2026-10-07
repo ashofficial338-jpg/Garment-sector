@@ -36,7 +36,8 @@ export async function ensureAdmin() {
 export async function ensureMasters() {
   if (await models.master.exists({})) return;
   const rows = [];
-  const add = (masterType, list, extra = () => ({})) => list.forEach((name, i) => rows.push({ masterType, name, code: String(name).slice(0, 12).toUpperCase(), refNo: `MST-${masterType.slice(0, 3).toUpperCase()}-${i + 1}`, status: 'Active', ...extra(name) }));
+  // one running sequence for all seeded masters → unique refNo regardless of type names
+  const add = (masterType, list, extra = () => ({})) => list.forEach((name) => rows.push({ masterType, name, code: String(name).slice(0, 12).toUpperCase(), refNo: `MST-${String(rows.length + 1).padStart(4, '0')}`, status: 'Active', ...extra(name) }));
   add('Size', ['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL']);
   add('Color', ['White', 'Black', 'Navy', 'Grey Melange', 'Red', 'Royal Blue', 'Olive', 'Heather']);
   add('Garment Type', ['T-Shirt', 'Polo Shirt', 'Sweatshirt', 'Hoodie', 'Jogger', 'Shorts', 'Dress', 'Shirt', 'Trouser', 'Jacket']);
