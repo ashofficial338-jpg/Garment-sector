@@ -7,7 +7,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://stitchflow-erp-api.onrender.com/api/:path*"
+      "destination": "https://garment-sector-3.onrender.com/api/:path*"
     },
     {
       "source": "/((?!api/).*)",

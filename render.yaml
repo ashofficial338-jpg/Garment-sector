@@ -2,7 +2,7 @@
 # Dashboard → New → Blueprint → select this repo. Values marked sync:false are entered by you in the dashboard.
 services:
   - type: web
-    name: stitchflow-erp-api
+    name: garment-sector-3
     runtime: node
     plan: free            # free instances sleep after 15 min idle (≈50 s cold start); use "starter" for always-on
     region: singapore     # keep the MongoDB Atlas cluster in the same region (AWS ap-southeast-1)
