@@ -11,6 +11,7 @@
     "build": "npm --prefix client run build",
     "start": "npm --prefix server start",
     "seed:demo": "npm --prefix server run seed:demo",
-    "seed:stock": "npm --prefix server run seed:stock"
+    "seed:stock": "npm --prefix server run seed:stock",
+    "dev:remote": "npm --prefix client run dev:remote"
   }
 }

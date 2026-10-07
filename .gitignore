@@ -7,3 +7,4 @@ client/dist/
 .vercel
 .env*
 !server/.env.example
+!client/.env.remote
