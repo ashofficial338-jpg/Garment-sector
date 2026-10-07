@@ -62,6 +62,6 @@ bcrypt (12 rounds), short-lived JWT access tokens held in memory, rotating httpO
 
 ```bash
 cd server
-PORT=5051 MONGO_URI=mongodb://127.0.0.1:27017/garment_erp_test DISABLE_SCHEDULER=true node src/index.js &
+PORT=5051 ADMIN_PASSWORD=Admin@12345 MONGO_URI=mongodb://127.0.0.1:27017/garment_erp_test DISABLE_SCHEDULER=true node src/index.js &
 node tests/e2e.mjs
 ```

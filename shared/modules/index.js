@@ -8,10 +8,12 @@ import * as commercial from './commercial.js';
 import * as planning from './planning.js';
 import * as production from './production.js';
 import * as finance from './finance.js';
+import * as stock from './stock.js';
 
 const ordered = [
   commercial.enquiry, commercial.costing, commercial.quotation, commercial.orders,
-  planning.tna, planning.ppMeeting, planning.fabricBooking, planning.trimBooking, planning.sample, planning.productionPlan,
+  planning.tna, planning.ppMeeting, planning.fabricBooking, planning.trimBooking,
+  stock.yarnReceipt, stock.knitting, stock.fabricProcess, planning.sample, planning.productionPlan,
   production.cutting, production.sewing, production.finishing, production.packing, production.inspection,
   finance.shipment, finance.invoice, finance.payment, finance.expense,
   masters.buyer, masters.supplier, masters.master, masters.employee,
@@ -58,4 +60,4 @@ export function allowedTransitions(def, current) {
   return def.transitions?.[current] || [];
 }
 
-export { masters, commercial, planning, production, finance };
+export { masters, commercial, planning, production, finance, stock };

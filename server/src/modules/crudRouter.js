@@ -139,7 +139,8 @@ export function crudRouter(def) {
     if (def.onePerJob && job && await Model.exists({ job: job._id, isDeleted: false })) {
       throw ApiError.conflict(`${def.singular} already exists for ${job.jobNo}`);
     }
-    let data = { ...(def.prefill && job ? def.prefill(job) : {}), ...sanitize(def, req.body) };
+    const defaults = Object.fromEntries(def.fields.filter((f) => f.default !== undefined && !f.readOnly).map((f) => [f.name, f.default]));
+    let data = { ...defaults, ...(def.prefill && job ? def.prefill(job) : {}), ...sanitize(def, req.body) };
     Object.keys(data).forEach((k) => data[k] === undefined && delete data[k]);
     data.status = def.defaultStatus;
     const ctx = { def, data, job, req, isCreate: true, override: !!reason };

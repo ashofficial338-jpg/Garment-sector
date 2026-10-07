@@ -13,6 +13,7 @@ import searchRoutes from './search.js';
 import reportRoutes from './reports.js';
 import lookupRoutes from './lookup.js';
 import quotationRoutes from './quotation.js';
+import stockRoutes from './stock.js';
 import { PERMISSION_MODULES } from '../services/permissions.js';
 import { getSetting } from '../services/settings.js';
 
@@ -38,6 +39,7 @@ api.use('/search', searchRoutes);
 api.use('/reports', reportRoutes);
 api.use('/lookup', lookupRoutes);
 api.use('/quotations', quotationRoutes);
+api.use('/stock', stockRoutes);
 MODULE_LIST.forEach((def) => api.use(`/m/${def.key}`, crudRouter(def)));
 
 export default api;

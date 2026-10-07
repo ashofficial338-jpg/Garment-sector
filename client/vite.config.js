@@ -10,7 +10,7 @@ export default defineConfig({
     fs: { allow: ['..'] },
     proxy: {
       '/api': {
-        target: 'http://localhost:5050',
+        target: process.env.API_TARGET || 'http://localhost:5050',
         changeOrigin: true,
         // Clear message instead of a bare 500 when the API server is not running
         configure: (proxy) => proxy.on('error', (_err, _req, res) => {

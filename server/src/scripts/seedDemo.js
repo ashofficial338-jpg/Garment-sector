@@ -16,6 +16,7 @@ import { refreshJob } from '../services/lifecycle.js';
 import { syncInvoice, syncProductionPlan } from '../modules/hooks.js';
 import { nextRefNo } from '../services/numbering.js';
 import { logger } from '../utils/logger.js';
+import { seedStockDemo } from './stockDemo.js';
 
 const DAY = 86400000;
 const d = (offset) => new Date(new Date().setHours(0, 0, 0, 0) + offset * DAY);
@@ -193,6 +194,7 @@ async function main() {
   const subs = await createSubJobs(j6._id, [{ orderQty: 10000, shipmentDate: d(30) }, { orderQty: 8000, shipmentDate: d(60) }, { orderQty: 12000, shipmentDate: d(90) }], req);
   await progress(subs[0].toObject(), 'cutting');
 
+  await seedStockDemo(req);
   logger.info('Demo data created: 6 jobs (+3 sub jobs), enquiries, costing, buyers, suppliers, employees');
 }
 

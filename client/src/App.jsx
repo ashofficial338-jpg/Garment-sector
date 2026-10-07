@@ -21,6 +21,7 @@ const Notifications = lazy(() => import('./pages/Notifications.jsx'));
 const Framework = lazy(() => import('./pages/Framework.jsx'));
 const Masters = lazy(() => import('./pages/Masters.jsx'));
 const Profit = lazy(() => import('./pages/Profit.jsx'));
+const StockReports = lazy(() => import('./pages/StockReports.jsx'));
 
 export default function App() {
   const { user, ready } = useAuth();
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="documents" element={<Documents />} />
           <Route path="reports" element={<Reports />} />
           <Route path="profit" element={<Profit />} />
+          <Route path="stock" element={<StockReports />} />
           <Route path="notifications" element={<Notifications />} />
           <Route path="framework" element={<Framework />} />
           <Route path="admin/users" element={<Users />} />

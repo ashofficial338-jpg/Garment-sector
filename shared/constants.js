@@ -76,4 +76,5 @@ export const SYSTEM_PERMISSION_MODULES = [
   { key: 'settings', title: 'System Settings / Workflow' },
   { key: 'audit', title: 'Audit Trail' },
   { key: 'profit', title: 'Profit Analysis' },
+  { key: 'stock', title: 'Stock Reports' },
 ];

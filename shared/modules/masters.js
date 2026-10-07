@@ -25,7 +25,7 @@ export const supplier = {
   fields: [
     text('name', 'Supplier Name', { required: true, list: true, search: true }),
     text('code', 'Supplier Code', { list: true, search: true }),
-    sel('supplierType', 'Supplier Type', ['Fabric', 'Yarn', 'Trims', 'Accessories', 'Washing', 'Printing', 'Embroidery', 'Dyeing', 'Logistics', 'Testing Lab', 'Other'], { list: true, filter: true, required: true }),
+    sel('supplierType', 'Supplier Type', ['Fabric', 'Yarn', 'Knitting', 'Fabric Processing', 'Trims', 'Accessories', 'Washing', 'Printing', 'Embroidery', 'Dyeing', 'Logistics', 'Testing Lab', 'Other'], { list: true, filter: true, required: true }),
     text('contactPerson', 'Contact Person'), text('email', 'Email'), text('phone', 'Phone', { list: true }),
     text('country', 'Country', { list: true }),
     n('leadTimeDays', 'Lead Time (days)'), n('rating', 'Rating (1-5)', { max: 5 }),

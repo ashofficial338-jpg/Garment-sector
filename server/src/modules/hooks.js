@@ -12,6 +12,7 @@ import { ApiError } from '../utils/ApiError.js';
 import { notify } from '../services/notify.js';
 import { getSetting } from '../services/settings.js';
 import { num, sum, round, efficiency } from '../../../shared/calc.js';
+import { yarnAvailable, stageAvailable } from '../services/stock.js';
 
 const others = async (key, ctx, extra = {}) => models[key].find({
   job: ctx.job._id, isDeleted: false, _id: { $ne: ctx.existing?._id }, ...extra,
@@ -111,6 +112,25 @@ export const hooks = {
       }
     },
   },
+  /* ---------------- Fabric stock chain ---------------- */
+  knitting: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      const available = await yarnAvailable(d.yarnCount, d.lotNo, ctx.existing?._id);
+      guard(ctx, num(d.yarnIssuedKg) <= available + 0.001, `Yarn issued (${num(d.yarnIssuedKg)} kg) exceeds yarn stock for "${d.yarnCount}"${d.lotNo ? ` lot ${d.lotNo}` : ''} (${available} kg available)`);
+      guard(ctx, num(d.greyReceivedKg) + num(d.rejectedKg) <= num(d.yarnIssuedKg) + 0.001, 'Grey received + rejected cannot exceed yarn issued');
+    },
+  },
+  fabricProcess: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      if (d.inputStage === d.outputStage && d.inputStage === 'Finished Fabric') throw ApiError.badRequest('Input and output stage cannot both be Finished Fabric');
+      const available = await stageAvailable(d.inputStage, d.fabricType, d.color, ctx.existing?._id);
+      guard(ctx, num(d.issuedKg) <= available + 0.001, `Issued ${num(d.issuedKg)} kg exceeds ${d.inputStage.toLowerCase()} stock for "${d.fabricType}" (${available} kg available)`);
+      guard(ctx, num(d.receivedKg) + num(d.rejectedKg) <= num(d.issuedKg) + 0.001, 'Received + rejected cannot exceed issued quantity');
+    },
+  },
+
   sample: {
     async afterSave(ctx) {
       const d = ctx.saved;

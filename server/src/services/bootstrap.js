@@ -12,8 +12,15 @@ import { PAYMENT_TERMS, INCOTERMS, TRIM_ITEMS } from '../../../shared/modules/co
 export async function ensureRoles() {
   for (const r of DEFAULT_ROLES) {
     const exists = await Role.findOne({ name: r.name });
-    if (!exists) await Role.create(r);
-    else if (r.isAdmin && !exists.isAdmin) { exists.isAdmin = true; exists.isSystem = true; await exists.save(); }
+    if (!exists) { await Role.create(r); continue; }
+    if (r.isAdmin && !exists.isAdmin) { exists.isAdmin = true; exists.isSystem = true; }
+    // New modules added in later releases: grant their default permissions, but never touch
+    // modules the role already has an entry for (keeps Admin's customisations).
+    let changed = false;
+    Object.entries(r.permissions || {}).forEach(([mod, acts]) => {
+      if (!exists.permissions.has(mod)) { exists.permissions.set(mod, acts); changed = true; }
+    });
+    if (changed || exists.isModified()) await exists.save();
   }
 }
 

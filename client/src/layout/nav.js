@@ -20,6 +20,12 @@ export const NAV = [
     { to: '/m/fabricBooking', label: 'Fabric Booking', icon: 'Layers', perm: ['fabricBooking'] },
     { to: '/m/trimBooking', label: 'Trim Booking', icon: 'Tag', perm: ['trimBooking'] },
   ] },
+  { group: 'Fabric Stock', items: [
+    { to: '/m/yarnReceipt', label: 'Yarn Inward', icon: 'Package', perm: ['yarnReceipt'] },
+    { to: '/m/knitting', label: 'Knitting', icon: 'Waypoints', perm: ['knitting'] },
+    { to: '/m/fabricProcess', label: 'Fabric Processing', icon: 'Droplets', perm: ['fabricProcess'] },
+    { to: '/stock', label: 'Stock Reports', icon: 'Warehouse', perm: ['stock'] },
+  ] },
   { group: 'Production', items: [
     { to: '/m/productionPlan', label: 'Production Planning', icon: 'GanttChartSquare', perm: ['productionPlan'] },
     { to: '/m/cutting', label: 'Cutting', icon: 'Scissors', perm: ['cutting'] },
