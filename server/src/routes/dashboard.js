@@ -5,7 +5,7 @@ import { permit } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { num, sum, round, pct } from '../../../shared/calc.js';
 import { User } from '../models/User.js';
-import { loadJobGraph, computeProfit } from '../services/lifecycle.js';
+import { loadJobGraphs, computeProfit } from '../services/lifecycle.js';
 
 const r = express.Router();
 const live = { isDeleted: false };
@@ -19,7 +19,7 @@ r.get('/', permit('dashboard', 'view'), asyncHandler(async (req, res) => {
   const in14 = new Date(today.getTime() + 14 * 86400000);
   const M = models;
 
-  const [jobs, enquiries, costings, quotations, samples, fabric, trims, cutting, sewing, finishing, inspections, shipments, invoices, payments, expenses, tnas, lines, employees] = await Promise.all([
+  const [jobs, enquiries, costings, quotations, samples, fabric, trims, cutting, sewing, finishing, inspections, shipments, invoices, payments, expenses, tnas, lines, employees, userCount] = await Promise.all([
     M.orders.find(live).lean(), M.enquiry.find(live).lean(), M.costing.find(live).lean(), M.quotation.find(live).lean(),
     M.sample.find(live).lean(), M.fabricBooking.find(live).lean(), M.trimBooking.find(live).lean(),
     M.cutting.find({ ...live, status: { $ne: 'Rejected' } }).lean(), M.sewing.find({ ...live, status: { $ne: 'Rejected' } }).lean(),
@@ -27,6 +27,7 @@ r.get('/', permit('dashboard', 'view'), asyncHandler(async (req, res) => {
     M.shipment.find({ ...live, status: { $ne: 'Cancelled' } }).lean(), M.invoice.find({ ...live, status: { $ne: 'Cancelled' } }).lean(),
     M.payment.find(live).lean(), M.expense.find({ ...live, status: { $ne: 'Rejected' } }).lean(), M.tna.find(live).lean(),
     M.master.countDocuments({ ...live, masterType: 'Production Line' }), M.employee.find(live).lean(),
+    User.countDocuments({ isDeleted: false }),
   ]);
 
   // Jobs that carry production (exclude forecast parents with sub jobs to avoid double counting)
@@ -47,8 +48,8 @@ r.get('/', permit('dashboard', 'view'), asyncHandler(async (req, res) => {
   // actual profit across jobs that have revenue
   let actualProfit = 0; let actualRevenue = 0; let actualCost = 0;
   const revenueJobs = leaf.filter((j) => invoices.some((i) => String(i.job) === String(j._id)) || shippedByJob[j._id]).slice(0, 300);
-  for (const j of revenueJobs) {
-    const p = computeProfit(await loadJobGraph(j));
+  for (const g of await loadJobGraphs(revenueJobs)) {
+    const p = computeProfit(g);
     actualProfit += p.actualProfit; actualRevenue += p.revenue; actualCost += p.totalExpenses;
   }
 
@@ -162,7 +163,7 @@ r.get('/', permit('dashboard', 'view'), asyncHandler(async (req, res) => {
       operators: employees.filter((e) => e.isOperator && e.status === 'Active').length,
       onLeave: employees.filter((e) => e.status === 'On Leave').length,
       avgAttendancePct: employees.length ? round(sum(employees, 'attendancePct') / employees.length, 1) : 0,
-      users: await User.countDocuments({ isDeleted: false }),
+      users: userCount,
       byDepartment: Object.entries(employees.reduce((m, e) => ({ ...m, [e.department || 'Unassigned']: (m[e.department || 'Unassigned'] || 0) + 1 }), {})).map(([name, value]) => ({ name, value })),
     },
   };

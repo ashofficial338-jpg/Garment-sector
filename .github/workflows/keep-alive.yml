@@ -1,0 +1,17 @@
+# Keeps the free Render backend awake during factory working hours so users
+# don't wait ~50 s for a cold start. Runs every 10 minutes, Mon–Sat 07:30–21:30 IST.
+# (Uses ~360 of Render's 750 free hours per month. GitHub may delay scheduled runs slightly.)
+name: Keep backend awake
+
+on:
+  schedule:
+    - cron: "*/10 2-16 * * 1-6"   # UTC → 07:30–21:30 IST
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping health endpoint
+        run: curl -fsS --max-time 120 https://garment-sector-3.onrender.com/health || echo "backend did not answer (will retry next run)"

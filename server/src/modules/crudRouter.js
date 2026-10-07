@@ -24,7 +24,7 @@ import { pageParams } from '../utils/query.js';
 import { diffObjects } from '../utils/diff.js';
 import { audit, describeChanges } from '../services/audit.js';
 import { nextRefNo } from '../services/numbering.js';
-import { refreshJob } from '../services/lifecycle.js';
+import { refreshJobSoon } from '../services/lifecycle.js';
 import { sendExport, moduleColumns } from '../services/exporter.js';
 
 const APPROVAL_STATUSES = ['Approved', 'Final Approved', 'Rejected', 'Verified', 'Reconciled', 'Passed', 'Failed'];
@@ -161,7 +161,7 @@ export function crudRouter(def) {
     if (ctx.overrideUsed) await audit(req, { action: 'OVERRIDE', module: def.key, record: doc, reason, message: ctx.overrideUsed.join('; ') });
     ctx.saved = doc.toObject();
     if (H.afterSave) await H.afterSave(ctx);
-    if (job) await refreshJob(job._id);
+    if (job) refreshJobSoon(job._id);
     res.status(201).json(doc);
   }));
 
@@ -198,7 +198,7 @@ export function crudRouter(def) {
     if (ctx.overrideUsed) await audit(req, { action: 'OVERRIDE', module: def.key, record: doc, reason, message: ctx.overrideUsed.join('; ') });
     ctx.saved = doc.toObject();
     if (H.afterSave) await H.afterSave(ctx);
-    if (job) await refreshJob(job._id);
+    if (job) refreshJobSoon(job._id);
     res.json(doc);
   }));
 
@@ -247,7 +247,7 @@ export function crudRouter(def) {
     const ctx = { def, data: doc.toObject(), existing: { status: from }, req, saved: doc.toObject(), statusExplicit: true };
     if (def.jobLinked && doc.job) ctx.job = await models.orders.findById(doc.job).lean();
     if (H.afterSave && (ctx.job || !def.jobLinked)) await H.afterSave(ctx);
-    if (doc.job) await refreshJob(doc.job);
+    if (doc.job) refreshJobSoon(doc.job);
     res.json(doc);
   }));
 
@@ -262,7 +262,7 @@ export function crudRouter(def) {
     await doc.save();
     await audit(req, { action: 'DELETE', module: def.key, record: doc, reason: doc.deleteReason, message: `${req.user.name} deleted ${def.singular} ${doc.refNo}` });
     if (H.afterDelete) await H.afterDelete(doc.toObject());
-    if (doc.job) await refreshJob(doc.job);
+    if (doc.job) refreshJobSoon(doc.job);
     res.json({ ok: true });
   }));
 
@@ -274,7 +274,7 @@ export function crudRouter(def) {
     await doc.save();
     await audit(req, { action: 'RESTORE', module: def.key, record: doc, message: `${req.user.name} restored ${def.singular} ${doc.refNo}` });
     if (H.afterDelete) await H.afterDelete(doc.toObject());
-    if (doc.job) await refreshJob(doc.job);
+    if (doc.job) refreshJobSoon(doc.job);
     res.json(doc);
   }));
 

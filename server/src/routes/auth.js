@@ -6,7 +6,7 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { env } from '../config/env.js';
 import { User } from '../models/User.js';
 import { Session } from '../models/Session.js';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, clearUserCache } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 import { audit } from '../services/audit.js';
@@ -107,6 +107,7 @@ r.post('/change-password', authenticate, asyncHandler(async (req, res) => {
   user.passwordChangedAt = new Date();
   await user.save();
   await Session.updateMany({ user: user._id, revokedAt: null }, { revokedAt: new Date() });
+  clearUserCache(user._id);
   await issueRefresh(req, res, user);
   await audit(req, { action: 'PASSWORD_CHANGE', module: 'auth', message: `${user.name} changed password` });
   res.json({ accessToken: signAccess(user), user: userPayload(user) });

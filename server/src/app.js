@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import cors from 'cors';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
+import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 import path from 'path';
 import fs from 'fs';
@@ -29,6 +30,7 @@ export function createApp() {
   app.disable('x-powered-by');
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'same-site' } }));
   app.use(cors({ origin: env.clientOrigin, credentials: true }));
+  app.use(compression({ threshold: 1024 })); // gzip JSON responses (dashboards/reports shrink 70–90 %)
   app.use(express.json({ limit: '2mb' }));
   app.use(cookieParser());
   app.use((req, _res, next) => { sanitizeInput(req.body); sanitizeInput(req.query); next(); });

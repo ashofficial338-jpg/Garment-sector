@@ -11,7 +11,7 @@ import { ApiError } from '../utils/ApiError.js';
 import { escapeRegex, pageParams } from '../utils/query.js';
 import { audit } from '../services/audit.js';
 import { nextRefNo } from '../services/numbering.js';
-import { refreshJob } from '../services/lifecycle.js';
+import { refreshJobSoon } from '../services/lifecycle.js';
 import { DOCUMENT_TYPES } from '../../../shared/constants.js';
 
 const r = express.Router();
@@ -52,7 +52,7 @@ r.post('/', permit('documents', 'create'), upload.single('file'), asyncHandler(a
       currentVersion: 1, createdBy: req.user._id, createdByName: req.user.name,
     });
     await audit(req, { action: 'UPLOAD', module: 'documents', record: doc, jobNo: doc.jobNo, message: `${req.user.name} uploaded ${docType} "${doc.title}"` });
-    if (job) await refreshJob(job._id);
+    if (job) refreshJobSoon(job._id);
     res.status(201).json(doc);
   } catch (e) {
     if (fileId && !doc) await removeFile(fileId); // orphaned upload only
@@ -94,7 +94,7 @@ r.delete('/:id', permit('documents', 'delete'), asyncHandler(async (req, res) =>
   doc.isDeleted = true; doc.deletedAt = new Date(); doc.deletedBy = req.user._id;
   await doc.save();
   await audit(req, { action: 'DELETE', module: 'documents', record: doc, reason: req.body?.reason, message: `${req.user.name} deleted document "${doc.title}"` });
-  if (doc.job) await refreshJob(doc.job);
+  if (doc.job) refreshJobSoon(doc.job);
   res.json({ ok: true });
 }));
 
@@ -102,7 +102,7 @@ r.post('/:id/restore', adminOnly, asyncHandler(async (req, res) => {
   const doc = await DocumentFile.findByIdAndUpdate(req.params.id, { isDeleted: false, deletedAt: null }, { new: true });
   if (!doc) throw ApiError.notFound();
   await audit(req, { action: 'RESTORE', module: 'documents', record: doc, message: `${req.user.name} restored document "${doc.title}"` });
-  if (doc.job) await refreshJob(doc.job);
+  if (doc.job) refreshJobSoon(doc.job);
   res.json(doc);
 }));
 

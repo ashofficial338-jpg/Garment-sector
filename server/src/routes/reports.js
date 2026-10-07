@@ -8,7 +8,7 @@ import { can } from '../services/permissions.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 import { sendExport, moduleColumns } from '../services/exporter.js';
-import { loadJobGraph, computeProfit } from '../services/lifecycle.js';
+import { loadJobGraphs, computeProfit } from '../services/lifecycle.js';
 import { audit } from '../services/audit.js';
 import { num } from '../../../shared/calc.js';
 
@@ -65,12 +65,8 @@ r.get('/:key', permit('reports', 'view'), asyncHandler(async (req, res) => {
     if (req.query.state) rows = rows.filter((a) => a.state === req.query.state);
   }
   if (rep.custom === 'profit') {
-    const out = [];
-    for (const j of rows.filter((x) => !(x.isForecast && num(x.subJobCount) > 0)).slice(0, 1000)) {
-      const p = computeProfit(await loadJobGraph(j));
-      out.push({ ...j, ...p });
-    }
-    rows = out;
+    const jobs = rows.filter((x) => !(x.isForecast && num(x.subJobCount) > 0)).slice(0, 1000);
+    rows = (await loadJobGraphs(jobs)).map((g) => ({ ...g.job, ...computeProfit(g) }));
   }
   if (rep.custom === 'closure') rows = rows.map((x) => ({ ...x, readyToClose: x.readyToClose ? 'Yes' : 'No', blockers: (x.closureBlockers || []).join('; ') }));
 

@@ -4,6 +4,24 @@ import { User } from '../models/User.js';
 import { ApiError } from '../utils/ApiError.js';
 import { effectivePermissions, can } from '../services/permissions.js';
 
+/**
+ * Short-lived cache of authenticated users (with role) – saves two database round trips per request.
+ * Cleared whenever a user, role or password changes (see clearUserCache).
+ */
+const USER_TTL_MS = 30000;
+const userCache = new Map();
+export function clearUserCache(userId) {
+  if (userId) userCache.delete(String(userId)); else userCache.clear();
+}
+async function loadUser(id) {
+  const hit = userCache.get(id);
+  if (hit && hit.expires > Date.now()) return hit.user;
+  const user = await User.findById(id).populate('role');
+  if (user) userCache.set(id, { user, expires: Date.now() + USER_TTL_MS });
+  if (userCache.size > 2000) userCache.delete(userCache.keys().next().value);
+  return user;
+}
+
 /** Verifies the Bearer access token and attaches req.user + req.perms. */
 export async function authenticate(req, _res, next) {
   try {
@@ -16,7 +34,7 @@ export async function authenticate(req, _res, next) {
     } catch {
       throw ApiError.unauthorized('Session expired');
     }
-    const user = await User.findById(payload.sub).populate('role');
+    const user = await loadUser(String(payload.sub));
     if (!user || !user.isActive || user.isDeleted) throw ApiError.unauthorized('Account disabled');
     if (user.passwordChangedAt && payload.iat * 1000 < user.passwordChangedAt.getTime() - 1000) {
       throw ApiError.unauthorized('Password changed – please sign in again');

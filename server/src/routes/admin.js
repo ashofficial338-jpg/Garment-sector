@@ -6,7 +6,7 @@ import { User } from '../models/User.js';
 import { Role } from '../models/Role.js';
 import { Session } from '../models/Session.js';
 import { AuditLog } from '../models/AuditLog.js';
-import { permit, adminOnly } from '../middleware/auth.js';
+import { permit, adminOnly, clearUserCache } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 import { escapeRegex, pageParams } from '../utils/query.js';
@@ -85,6 +85,7 @@ r.put('/users/:id', permit('users', 'edit'), asyncHandler(async (req, res) => {
   const after = { name: user.name, email: user.email, role: String(user.role?._id || user.role), department: user.department, isActive: user.isActive, permissions: Object.fromEntries(user.permissions), revoked: Object.fromEntries(user.revoked) };
   const changes = diffObjects(before, after);
   if (!user.isActive) await Session.updateMany({ user: user._id, revokedAt: null }, { revokedAt: new Date() });
+  clearUserCache(user._id);
   await audit(req, { action: 'UPDATE', module: 'users', record: { _id: user._id, refNo: user.email }, changes, message: `${req.user.name} updated user ${user.email}` });
   res.json(user);
 }));
@@ -97,6 +98,7 @@ r.post('/users/:id/reset-password', permit('users', 'edit'), asyncHandler(async 
   user.passwordHash = await bcrypt.hash(String(req.body.password), 12);
   user.mustChangePassword = true; user.passwordChangedAt = new Date(); user.lockUntil = null; user.failedLogins = 0;
   await user.save();
+  clearUserCache(user._id);
   await Session.updateMany({ user: user._id, revokedAt: null }, { revokedAt: new Date() });
   await audit(req, { action: 'PASSWORD_RESET', module: 'users', record: { _id: user._id, refNo: user.email }, message: `${req.user.name} reset password for ${user.email}` });
   res.json({ ok: true });
@@ -109,6 +111,7 @@ r.delete('/users/:id', permit('users', 'delete'), asyncHandler(async (req, res) 
   if (user.role?.isAdmin && !req.perms.isAdmin) throw ApiError.forbidden();
   user.isDeleted = true; user.isActive = false; user.deletedAt = new Date(); user.deletedBy = req.user._id;
   await user.save();
+  clearUserCache(user._id);
   await Session.updateMany({ user: user._id, revokedAt: null }, { revokedAt: new Date() });
   await audit(req, { action: 'DELETE', module: 'users', record: { _id: user._id, refNo: user.email }, message: `${req.user.name} deleted user ${user.email}` });
   res.json({ ok: true });
@@ -117,6 +120,7 @@ r.delete('/users/:id', permit('users', 'delete'), asyncHandler(async (req, res) 
 r.post('/users/:id/restore', adminOnly, asyncHandler(async (req, res) => {
   const user = await User.findByIdAndUpdate(req.params.id, { isDeleted: false, isActive: true, deletedAt: null }, { new: true });
   if (!user) throw ApiError.notFound();
+  clearUserCache(user._id);
   await audit(req, { action: 'RESTORE', module: 'users', record: { _id: user._id, refNo: user.email }, message: `${req.user.name} restored user ${user.email}` });
   res.json(user);
 }));
@@ -145,6 +149,7 @@ r.put('/roles/:id', adminOnly, asyncHandler(async (req, res) => {
   ['name', 'department', 'description', 'dashboard'].forEach((k) => { if (req.body[k] !== undefined) role[k] = req.body[k]; });
   if (req.body.permissions) role.permissions = cleanPerms(req.body.permissions);
   await role.save();
+  clearUserCache(); // role permissions changed for everyone holding it
   const after = { name: role.name, description: role.description, permissions: Object.fromEntries(role.permissions) };
   await audit(req, { action: 'UPDATE', module: 'roles', record: { _id: role._id, refNo: role.name }, changes: diffObjects(before, after), message: `${req.user.name} updated permissions of role ${role.name}` });
   res.json(role);
@@ -156,6 +161,7 @@ r.delete('/roles/:id', adminOnly, asyncHandler(async (req, res) => {
   if (role.isSystem) throw ApiError.badRequest('System roles cannot be deleted');
   if (await User.exists({ role: role._id, isDeleted: false })) throw ApiError.badRequest('Role is assigned to users');
   await role.deleteOne();
+  clearUserCache();
   await audit(req, { action: 'DELETE', module: 'roles', record: { _id: role._id, refNo: role.name }, message: `${req.user.name} deleted role ${role.name}` });
   res.json({ ok: true });
 }));

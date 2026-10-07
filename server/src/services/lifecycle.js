@@ -17,23 +17,51 @@ const today = () => new Date(new Date().toDateString());
 const live = (ids) => ({ job: { $in: ids }, isDeleted: false });
 
 /** Collect every record linked to the job (and its sub jobs for forecast main jobs). */
-export async function loadJobGraph(job) {
-  const Job = models.orders;
-  const subJobs = await Job.find({ parentJob: job._id, isDeleted: false }).lean();
-  const ids = [job._id, ...subJobs.map((s) => s._id)];
-  const q = (key, extra = {}) => models[key].find({ ...live(ids), ...extra }).lean();
-  const [tna, ppm, fabric, trims, samples, plans, cutting, sewing, finishing, packing, inspections, shipments, invoices, payments, expenses, docs] = await Promise.all([
-    q('tna'), q('ppMeeting'), q('fabricBooking'), q('trimBooking'), q('sample'), q('productionPlan'),
-    q('cutting', { status: { $ne: 'Rejected' } }), q('sewing', { status: { $ne: 'Rejected' } }), q('finishing', { status: { $ne: 'Rejected' } }),
-    q('packing'), q('inspection'), q('shipment', { status: { $ne: 'Cancelled' } }),
-    q('invoice', { status: { $ne: 'Cancelled' } }), q('payment'), q('expense', { status: { $ne: 'Rejected' } }),
-    DocumentFile.find({ job: { $in: ids }, isDeleted: false }).lean(),
+const GRAPH_SOURCES = [
+  ['tna', 'tna'], ['ppm', 'ppMeeting'], ['fabric', 'fabricBooking'], ['trims', 'trimBooking'], ['samples', 'sample'], ['plans', 'productionPlan'],
+  ['cutting', 'cutting', { status: { $ne: 'Rejected' } }], ['sewing', 'sewing', { status: { $ne: 'Rejected' } }], ['finishing', 'finishing', { status: { $ne: 'Rejected' } }],
+  ['packing', 'packing'], ['inspections', 'inspection'], ['shipments', 'shipment', { status: { $ne: 'Cancelled' } }],
+  ['invoices', 'invoice', { status: { $ne: 'Cancelled' } }], ['payments', 'payment'], ['expenses', 'expense', { status: { $ne: 'Rejected' } }],
+];
+
+/**
+ * Load the record graphs of many jobs with one query per collection (all in parallel),
+ * instead of ~20 queries per job. Includes sub jobs of forecast main jobs.
+ */
+export async function loadJobGraphs(jobs) {
+  if (!jobs.length) return [];
+  const jobIds = jobs.map((j) => j._id);
+  const subJobs = await models.orders.find({ parentJob: { $in: jobIds }, isDeleted: false }).lean();
+  const idsOf = new Map(jobs.map((j) => [String(j._id), [j._id, ...subJobs.filter((s) => String(s.parentJob) === String(j._id)).map((s) => s._id)]]));
+  const allIds = [...new Set([...idsOf.values()].flat().map(String))];
+  const refIds = (field) => jobs.map((j) => j[field]).filter(Boolean);
+  const commercial = (key, field) => models[key].find({ isDeleted: false, $or: [{ job: { $in: allIds } }, { _id: { $in: refIds(field) } }] }).lean();
+
+  const results = await Promise.all([
+    ...GRAPH_SOURCES.map(([, key, extra = {}]) => models[key].find({ ...live(allIds), ...extra }).lean()),
+    DocumentFile.find({ job: { $in: allIds }, isDeleted: false }).lean(),
+    commercial('enquiry', 'enquiry'), commercial('costing', 'costing'), commercial('quotation', 'quotation'),
   ]);
-  const or = [{ job: { $in: ids } }];
-  const enquiries = await models.enquiry.find({ isDeleted: false, $or: [...or, ...(job.enquiry ? [{ _id: job.enquiry }] : [])] }).lean();
-  const costings = await models.costing.find({ isDeleted: false, $or: [...or, ...(job.costing ? [{ _id: job.costing }] : [])] }).lean();
-  const quotations = await models.quotation.find({ isDeleted: false, $or: [...or, ...(job.quotation ? [{ _id: job.quotation }] : [])] }).lean();
-  return { job, subJobs, ids, enquiries, costings, quotations, tna, ppm, fabric, trims, samples, plans, cutting, sewing, finishing, packing, inspections, shipments, invoices, payments, expenses, docs };
+  const [docs, enquiries, costings, quotations] = results.slice(GRAPH_SOURCES.length);
+
+  return jobs.map((job) => {
+    const ids = idsOf.get(String(job._id));
+    const mine = new Set(ids.map(String));
+    const pick = (rows) => rows.filter((r) => mine.has(String(r.job)));
+    const pickCommercial = (rows, field) => rows.filter((r) => mine.has(String(r.job)) || (job[field] && String(r._id) === String(job[field])));
+    const g = { job, subJobs: subJobs.filter((s) => String(s.parentJob) === String(job._id)), ids };
+    GRAPH_SOURCES.forEach(([name], i) => { g[name] = pick(results[i]); });
+    return Object.assign(g, {
+      docs: pick(docs),
+      enquiries: pickCommercial(enquiries, 'enquiry'),
+      costings: pickCommercial(costings, 'costing'),
+      quotations: pickCommercial(quotations, 'quotation'),
+    });
+  });
+}
+
+export async function loadJobGraph(job) {
+  return (await loadJobGraphs([job]))[0];
 }
 
 /** Actual vs expected profit for a job graph. */
@@ -258,4 +286,19 @@ export async function refreshJob(jobId, { notifyReady = true } = {}) {
   }
   if (job.parentJob) await refreshJob(job.parentJob, { notifyReady });
   return { ...job, ...update };
+}
+
+/**
+ * Recalculate a job's lifecycle in the background (after the HTTP response is sent).
+ * Several saves on the same job in quick succession are coalesced into one recalculation.
+ */
+const queued = new Map();
+export function refreshJobSoon(jobId) {
+  if (!jobId) return;
+  const key = String(jobId);
+  if (queued.has(key)) return;
+  queued.set(key, setTimeout(() => {
+    queued.delete(key);
+    refreshJob(key).catch((e) => console.error('[lifecycle] background refresh failed', key, e.message));
+  }, 150));
 }
