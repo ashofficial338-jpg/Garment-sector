@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
@@ -32,6 +33,13 @@ export function createApp() {
   app.use(cookieParser());
   app.use((req, _res, next) => { sanitizeInput(req.body); sanitizeInput(req.query); next(); });
   app.use(morgan(env.isProd ? 'combined' : 'dev'));
+
+  // Short health path (alias of /api/health) for hosting health checks / uptime monitors
+  app.get('/health', (_req, res) => {
+    const db = mongoose.connection.readyState === 1;
+    res.status(db ? 200 : 503).json({ status: db ? 'OK' : 'DEGRADED', db: db ? 'connected' : 'disconnected', time: new Date().toISOString() });
+  });
+
   app.use('/api', rateLimit({ windowMs: 60 * 1000, limit: 600, standardHeaders: true, legacyHeaders: false }));
   app.use('/api', api);
   app.use('/api', notFound);
@@ -41,6 +49,9 @@ export function createApp() {
   if (fs.existsSync(dist)) {
     app.use(express.static(dist, { index: false, maxAge: '1h' }));
     app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
+  } else {
+    // API-only deployment (e.g. Render, frontend on Vercel): friendly landing response
+    app.get('/', (_req, res) => res.json({ service: 'Garment ERP API', status: 'running', health: '/api/health' }));
   }
   app.use(errorHandler);
   return app;
