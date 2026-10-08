@@ -4,14 +4,16 @@ import { useFeedback } from '../../components/Feedback.jsx';
 import { PageHead, Icon, Card, Badge, Modal } from '../../components/ui.jsx';
 import { DataTable } from '../../components/DataTable.jsx';
 import { fmtDateTime } from '../../utils/format.js';
+import { UnitScope, useUnitName } from '../../components/UnitScope.jsx';
 
-const ACTIONS = ['CREATE', 'UPDATE', 'DELETE', 'RESTORE', 'STATUS', 'OVERRIDE', 'CLOSE', 'REOPEN', 'APPROVE', 'LOGIN', 'LOGIN_FAILED', 'PASSWORD_CHANGE', 'PASSWORD_RESET', 'EXPORT', 'UPLOAD', 'VERSION', 'SUBJOB', 'REVISE', 'SETTINGS'];
+const ACTIONS = ['CREATE', 'UPDATE', 'DELETE', 'RESTORE', 'STATUS', 'OVERRIDE', 'CLOSE', 'REOPEN', 'APPROVE', 'LOGIN', 'LOGIN_FAILED', 'UNIT_SELECT', 'UNIT_SWITCH', 'PASSWORD_CHANGE', 'PASSWORD_RESET', 'EXPORT', 'UPLOAD', 'VERSION', 'SUBJOB', 'REVISE', 'SETTINGS'];
 const TONE = { DELETE: 'red', OVERRIDE: 'red', LOGIN_FAILED: 'red', CREATE: 'green', RESTORE: 'green', CLOSE: 'violet', UPDATE: 'blue', STATUS: 'amber' };
 const show = (v) => (v === null || v === undefined ? '—' : typeof v === 'object' ? JSON.stringify(v).slice(0, 300) : String(v));
 
 export default function Audit() {
   const { toast } = useFeedback();
-  const [f, setF] = useState({ q: '', action: '', module: '', jobNo: '', from: '', to: '' });
+  const unitName = useUnitName();
+  const [f, setF] = useState({ unit: '', q: '', action: '', module: '', jobNo: '', from: '', to: '' });
   const [data, setData] = useState({ rows: [], total: 0, pages: 1 });
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -25,6 +27,7 @@ export default function Audit() {
 
   const columns = [
     { key: 'createdAt', label: 'Date / time', render: (r) => <span className="small nowrap">{fmtDateTime(r.createdAt)}</span> },
+    ...(f.unit === 'ALL' ? [{ key: 'businessUnit', label: 'Unit', render: (r) => <span className="small nowrap">{unitName(r.businessUnit) || '—'}</span> }] : []),
     { key: 'userName', label: 'User' },
     { key: 'action', label: 'Action', render: (r) => <Badge tone={TONE[r.action] || 'grey'} dot={false}>{r.action}</Badge> },
     { key: 'module', label: 'Module' },
@@ -41,6 +44,7 @@ export default function Audit() {
       <Card pad={false}>
         <div className="table-toolbar">
           <div className="search"><Icon name="Search" size={15} /><input className="search-input" placeholder="Search message, user, ref…" value={f.q} onChange={(e) => setF({ ...f, q: e.target.value })} /></div>
+          <UnitScope value={f.unit} onChange={(v) => { setPage(1); setF({ ...f, unit: v }); }} />
           <select value={f.action} onChange={(e) => setF({ ...f, action: e.target.value })}><option value="">All actions</option>{ACTIONS.map((a) => <option key={a}>{a}</option>)}</select>
           <input placeholder="Module" value={f.module} onChange={(e) => setF({ ...f, module: e.target.value })} style={{ width: 130 }} />
           <input placeholder="Job No" value={f.jobNo} onChange={(e) => setF({ ...f, jobNo: e.target.value })} style={{ width: 160 }} />

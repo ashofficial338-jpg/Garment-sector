@@ -2,6 +2,7 @@ import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import net from 'net';
+import https from 'https';
 
 /**
  * The UI always calls /api on its own origin; this proxy decides which backend answers:
@@ -43,12 +44,16 @@ export default defineConfig(async ({ mode, command }) => {
           target,
           changeOrigin: true,
           secure: true,
+          // Reuse TLS connections to the remote backend instead of a new handshake per request
+          ...(remote && target.startsWith('https') ? { agent: new https.Agent({ keepAlive: true, maxSockets: 16 }) } : {}),
           // Render free instances can take ~50 s to wake up
           proxyTimeout: 120000,
           timeout: 120000,
           configure: (proxy) => {
-            proxy.on('error', (_err, _req, res) => {
-              if (res.headersSent) return;
+            proxy.on('error', (err, req, res) => {
+              // eslint-disable-next-line no-console
+              console.warn(`  [api] ${req.method} ${req.url} → ${err.code || err.message}`);
+              if (!res || res.headersSent) return;
               res.writeHead(503, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({
                 message: remote

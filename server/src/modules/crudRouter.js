@@ -27,7 +27,7 @@ import { nextRefNo } from '../services/numbering.js';
 import { refreshJobSoon } from '../services/lifecycle.js';
 import { sendExport, moduleColumns } from '../services/exporter.js';
 
-const APPROVAL_STATUSES = ['Approved', 'Final Approved', 'Rejected', 'Verified', 'Reconciled', 'Passed', 'Failed'];
+const APPROVAL_STATUSES = ['Approved', 'Final Approved', 'Pattern Approved', 'Rejected', 'Verified', 'Reconciled', 'Passed', 'Failed'];
 const LOCKED_STATUSES = ['Closed', 'Fabric Job Closed', 'Cancelled', 'Converted'];
 const ENVELOPE = ['_id', 'refNo', 'status', 'statusHistory', 'isDeleted', 'deletedAt', 'deletedBy', 'deleteReason',
   'createdBy', 'createdByName', 'updatedBy', 'createdAt', 'updatedAt', 'jobNo', 'parentJob', 'parentJobNo',
@@ -228,6 +228,15 @@ export function crudRouter(def) {
       override = true;
     }
     if (APPROVAL_STATUSES.includes(to) && !can(req.perms, def.key, 'approve')) throw ApiError.forbidden('Approve permission required');
+    if (H.beforeStatus) {
+      // stage gates (e.g. pattern approval needs an approved spec) – bypass only by override with reason
+      const gate = { def, doc: doc.toObject(), to, from, req, override: !!(reasonText && can(req.perms, def.key, 'override')) };
+      await H.beforeStatus(gate);
+      if (gate.overrideUsed) {
+        override = true;
+        await audit(req, { action: 'OVERRIDE', module: def.key, record: doc, reason: reasonText, message: gate.overrideUsed.join('; ') });
+      }
+    }
 
     doc.status = to;
     if (def.compute) {

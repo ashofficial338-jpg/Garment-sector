@@ -1,13 +1,17 @@
 /**
  * Order flow automation:
- *   Order Confirmed → Job No → T&A → Fabric & Trim requirement → PP Meeting
+ *   Order Confirmed → Job No → T&A → Fabric & Trim requirement → Specification & BOM → PP Meeting
  *   → Sampling tasks → Production plan draft → notifications.
+ *   An approved BOM creates bookings for any material line that has none.
  * Also handles quotation → order conversion, forecast sub jobs and change propagation.
  */
 import { models } from '../modules/builder.js';
 import { MODULES, applyCompute } from '../../../shared/modules/index.js';
 import { generateTna, num, sum } from '../../../shared/calc.js';
-import { nextJobNo, orderNoFromJobNo, nextSubJobCode, nextRefNo } from './numbering.js';
+import { UNITS } from '../../../shared/constants.js';
+import { TRIM_ITEMS } from '../../../shared/modules/commercial.js';
+import { materialPerPcFromCosting } from '../../../shared/modules/preproduction.js';
+import { nextJobNo, orderNoFromJobNo, nextSubJobCode, nextRefNo, resolveUnit } from './numbering.js';
 import { audit } from './audit.js';
 import { notify } from './notify.js';
 import { refreshJob } from './lifecycle.js';
@@ -23,7 +27,7 @@ async function createLinked(key, job, data, req) {
   const def = MODULES[key];
   const body = applyCompute(def, { status: def.defaultStatus, ...(def.prefill ? def.prefill(job) : {}), ...data });
   const doc = await models[key].create({
-    ...body, ...jobLink(job),
+    ...body, ...jobLink(job), businessUnit: job.businessUnit,
     refNo: await nextRefNo(def.prefix),
     createdBy: req?.user?._id, createdByName: req?.user?.name || 'system',
   });
@@ -49,6 +53,12 @@ export async function generateDownstream(job, req) {
       }, req));
     }
   }
+  if (!(await has('techSpec'))) {
+    created.push(await createLinked('techSpec', job, { specDate: job.orderDate || new Date() }, req));
+  }
+  if (!(await has('bom'))) {
+    created.push(await createLinked('bom', job, await bomFromBookings(job), req));
+  }
   if (!(await has('ppMeeting'))) {
     const d = new Date(job.orderDate || Date.now());
     const span = job.shipmentDate ? (new Date(job.shipmentDate) - d) * 0.06 : 5 * 86400000;
@@ -65,10 +75,80 @@ export async function generateDownstream(job, req) {
 
   await notify({
     type: 'INFO', severity: 'info', title: `New job ${job.jobNo} released`,
-    message: `${job.buyerName || ''} · Style ${job.styleNo} · ${job.orderQty} pcs. T&A, fabric, trims, PP meeting, samples and production plan were generated.`,
-    departments: ['Factory Merchandising', 'Fabric Department', 'Production', 'Costing Factory', 'Head Office Merchandising'],
+    message: `${job.buyerName || ''} · Style ${job.styleNo} · ${job.orderQty} pcs. T&A, specification, BOM, fabric, trims, PP meeting, samples and production plan were generated.`,
+    departments: ['Factory Merchandising', 'Fabric Department', 'Production', 'Costing Factory', 'Head Office Merchandising', 'CAD / Pattern'],
     job, link: `/jobs/${job.jobNo}`,
   });
+  return created;
+}
+
+/** Costed material cost per piece (fabric + trims + accessories) from the job's costing. */
+async function costedMaterial(job) {
+  const c = job.costing ? await models.costing.findById(job.costing).lean()
+    : await models.costing.findOne({ job: job._id, isDeleted: false, status: 'Approved' }).lean();
+  return materialPerPcFromCosting(c);
+}
+
+/** BOM built from the job's bookings (each line linked to its booking), or from the order when nothing is booked yet. */
+async function bomFromBookings(job) {
+  const [fabric, trims] = await Promise.all([
+    models.fabricBooking.find({ job: job._id, isDeleted: false }).sort({ createdAt: 1 }).lean(),
+    models.trimBooking.find({ job: job._id, isDeleted: false }).sort({ createdAt: 1 }).lean(),
+  ]);
+  const lines = fabric.length || trims.length ? [
+    ...fabric.map((f) => ({
+      category: 'Fabric', item: f.fabricType, description: [f.composition, f.gsm ? `${f.gsm} GSM` : ''].filter(Boolean).join(' · '),
+      color: f.color, unit: f.unit, consumptionPerPc: f.consumption, wastagePct: f.totalLossPct, rate: f.rate, bookingRef: f.refNo,
+    })),
+    ...trims.map((t) => ({
+      category: 'Trim', item: t.item, description: t.description, unit: t.unit, consumptionPerPc: t.consumptionPerPc,
+      wastagePct: t.wastagePct, rate: t.rate, bookingRef: t.refNo,
+    })),
+  ] : MODULES.bom.prefill(job).lines;
+  return { orderQty: job.orderQty, lines, costedMaterialPerPc: await costedMaterial(job) };
+}
+
+/**
+ * Approved BOM → bookings: every material line without a booking gets a fabric or trim booking,
+ * and the line is stamped with the booking ref so it is never booked twice.
+ */
+export async function createBookingsFromBom(bomId, req) {
+  const bom = await models.bom.findById(bomId);
+  if (!bom || bom.isDeleted || bom.status !== 'Approved') return [];
+  const job = await models.orders.findById(bom.job).lean();
+  if (!job || ['Closed', 'Cancelled'].includes(job.status)) return [];
+  const created = [];
+  for (const line of bom.lines) {
+    if (line.bookingRef || !line.item || !(num(line.consumptionPerPc) > 0)) continue;
+    let doc;
+    if (line.category === 'Fabric') {
+      doc = await createLinked('fabricBooking', job, {
+        fabricType: line.item, composition: line.description, color: line.color,
+        unit: ['KG', 'Meter', 'Yard'].includes(line.unit) ? line.unit : 'Meter',
+        orderQty: bom.orderQty || job.orderQty, consumption: line.consumptionPerPc, wastagePct: line.wastagePct || 0,
+        cuttingWastagePct: 0, shrinkagePct: 0, relaxationPct: 0, dyeingLossPct: 0, processLossPct: 0,
+        rate: line.rate, fromBom: true, remarks: `From ${bom.refNo}`,
+      }, req);
+    } else {
+      const known = TRIM_ITEMS.includes(line.item);
+      doc = await createLinked('trimBooking', job, {
+        item: known ? line.item : 'Other', description: known ? line.description : [line.item, line.description].filter(Boolean).join(' – '),
+        unit: UNITS.includes(line.unit) ? line.unit : 'Pcs', orderQty: bom.orderQty || job.orderQty,
+        consumptionPerPc: line.consumptionPerPc, wastagePct: line.wastagePct || 0, rate: line.rate, fromBom: true, remarks: `From ${bom.refNo}`,
+      }, req);
+    }
+    line.bookingRef = doc.refNo;
+    created.push(doc);
+  }
+  if (created.length) {
+    await bom.save();
+    await audit(req, { action: 'CREATE', module: 'bom', record: bom, message: `${bom.refNo} approved – bookings ${created.map((d) => d.refNo).join(', ')} created` });
+    await notify({
+      type: 'INFO', severity: 'info', title: `Bookings created from ${bom.refNo}`,
+      message: `${job.jobNo}: ${created.length} new booking(s) from the approved BOM – ${created.map((d) => d.refNo).join(', ')}.`,
+      departments: ['Fabric Department', 'Factory Merchandising'], job, module: 'bom', recordId: bom._id, link: `/m/bom/${bom._id}`,
+    });
+  }
   return created;
 }
 
@@ -85,11 +165,12 @@ export async function createJob(data, req, { skipDownstream = false } = {}) {
     const dup = await models.orders.exists({ buyer: data.buyer, poNo: data.poNo, styleNo: data.styleNo, isDeleted: false, parentJob: null });
     if (dup) throw ApiError.conflict(`PO ${data.poNo} / Style ${data.styleNo} already exists for this buyer`);
   }
-  const jobNo = data.jobNo || await nextJobNo(data.orderDate);
+  const businessUnit = resolveUnit(data.businessUnit);
+  const jobNo = data.jobNo || await nextJobNo(businessUnit);
   const body = applyCompute(def, { ...data, status: 'Confirmed' });
   const job = await models.orders.create({
     ...body,
-    jobNo, orderNo: orderNoFromJobNo(jobNo), refNo: jobNo,
+    jobNo, orderNo: orderNoFromJobNo(jobNo), refNo: jobNo, businessUnit,
     buyerName: await buyerName(data.buyer),
     createdBy: req?.user?._id, createdByName: req?.user?.name || 'system',
     statusHistory: [{ from: null, to: 'Confirmed', by: req?.user?._id, byName: req?.user?.name, reason: 'Order confirmed' }],
@@ -185,9 +266,11 @@ export async function propagateJobChanges(job, changes, req) {
     const def = MODULES[key];
     const recs = await models[key].find({ job: job._id, isDeleted: false });
     for (const r of recs) {
+      // bookings raised from extra BOM lines carry their own spec – only the order quantity follows the order
+      if (r.fromBom && !changed.has('orderQty')) continue;
       if (earlyStatuses.includes(r.status)) {
         const before = r.toObject();
-        const patch = def.prefill(job);
+        const patch = r.fromBom ? { orderQty: job.orderQty } : def.prefill(job);
         const next = applyCompute(def, { ...before, ...patch });
         def.fields.filter((f) => f.readOnly || patch[f.name] !== undefined).forEach((f) => { r.set(f.name, next[f.name]); });
         r.updatedBy = req.user._id;
@@ -207,6 +290,30 @@ export async function propagateJobChanges(job, changes, req) {
   await resync('trimBooking', ['orderQty'], ['Required', 'Booked']);
   await resync('productionPlan', ['orderQty'], ['Draft']);
   await resync('ppMeeting', ['orderQty'], ['Scheduled']);
+
+  // BOM: order quantity and the main fabric line follow the order while the BOM is still open
+  if (touches(fabricFields)) {
+    const bom = await models.bom.findOne({ job: job._id, isDeleted: false });
+    if (bom && ['Draft', 'Revised', 'Rejected'].includes(bom.status)) {
+      const before = bom.toObject();
+      const mainBooking = await models.fabricBooking.findOne({ job: job._id, isDeleted: false, fromBom: { $ne: true } }).sort({ createdAt: 1 }).lean();
+      const idx = before.lines.findIndex((l) => l.category === 'Fabric' && (!mainBooking || l.bookingRef === mainBooking.refNo));
+      const fab = MODULES.bom.prefill(job).lines.find((l) => l.category === 'Fabric');
+      const lines = before.lines.map((l, i) => (i === idx && fab ? { ...l, ...fab, bookingRef: l.bookingRef } : l));
+      const next = applyCompute(MODULES.bom, { ...before, orderQty: job.orderQty, lines });
+      MODULES.bom.fields.forEach((f) => bom.set(f.name, next[f.name]));
+      bom.updatedBy = req.user._id;
+      await bom.save();
+      impact.push({ module: 'Bill of Materials', refNo: bom.refNo, action: 'Recalculated automatically' });
+    } else if (bom) {
+      impact.push({ module: 'Bill of Materials', refNo: bom.refNo, action: `Review required (status: ${bom.status}) – revise the BOM`, warning: true });
+      await notify({
+        type: 'INFO', severity: 'warning', title: `Order change impacts BOM ${bom.refNo}`,
+        message: `${job.jobNo}: ${[...changed].join(', ')} changed after the BOM was ${bom.status}. Revise and re-approve it.`,
+        departments: ['Factory Merchandising'], job, module: 'bom', recordId: bom._id, link: `/m/bom/${bom._id}`,
+      });
+    }
+  }
 
   if (touches(['shipmentDate'])) {
     const tna = await models.tna.findOne({ job: job._id, isDeleted: false });

@@ -10,6 +10,7 @@ import { DocumentFile } from '../models/Document.js';
 import { getSetting } from './settings.js';
 import { notify } from './notify.js';
 import { FABRIC_FLOW } from '../../../shared/modules/planning.js';
+import { PATTERN_FLOW } from '../../../shared/modules/preproduction.js';
 import { num, sum, round, profitAnalysis } from '../../../shared/calc.js';
 
 const D = 'done', A = 'active', L = 'delayed', P = 'pending', NA = 'na';
@@ -18,6 +19,7 @@ const live = (ids) => ({ job: { $in: ids }, isDeleted: false });
 
 /** Collect every record linked to the job (and its sub jobs for forecast main jobs). */
 const GRAPH_SOURCES = [
+  ['specs', 'techSpec'], ['boms', 'bom'], ['patterns', 'pattern'], ['markers', 'marker'],
   ['tna', 'tna'], ['ppm', 'ppMeeting'], ['fabric', 'fabricBooking'], ['trims', 'trimBooking'], ['samples', 'sample'], ['plans', 'productionPlan'],
   ['cutting', 'cutting', { status: { $ne: 'Rejected' } }], ['sewing', 'sewing', { status: { $ne: 'Rejected' } }], ['finishing', 'finishing', { status: { $ne: 'Rejected' } }],
   ['packing', 'packing'], ['inspections', 'inspection'], ['shipments', 'shipment', { status: { $ne: 'Cancelled' } }],
@@ -134,6 +136,28 @@ export async function computeStages(g) {
   st.quotation = g.quotations.some((q) => ['Approved', 'Converted'].includes(q.status)) ? D : g.quotations.length ? A : NA;
   st.order = job.status === 'Cancelled' ? P : D;
 
+  // Pre-production: Specification → BOM → CAD → Pattern → Grading → Marker.
+  // Jobs that were already cutting before these records existed show them as not applicable.
+  const legacy = sum(g.cutting, 'cutQty') > 0;
+  const pre = (rows, done, issue = ['Rejected']) => (!rows.length ? (legacy ? NA : P)
+    : rows.some((r) => done.includes(r.status)) ? D : rows.some((r) => issue.includes(r.status)) ? L : A);
+  st.spec = pre(g.specs, ['Approved']);
+  st.bom = pre(g.boms, ['Approved']);
+  st.cad = pre(g.patterns, PATTERN_FLOW.slice(1), []);
+  st.pattern = pre(g.patterns, PATTERN_FLOW.slice(2));
+  st.grading = !g.patterns.length ? (legacy ? NA : P) : g.patterns.some((r) => PATTERN_FLOW.slice(3).includes(r.status)) ? D
+    : g.patterns.some((r) => r.status === 'Pattern Approved') ? A : P;
+  st.marker = pre(g.markers, ['Approved', 'Issued to Cutting']);
+  const bom = g.boms[0];
+  const mk = g.markers.filter((m) => m.status !== 'Rejected');
+  meta.preproduction = {
+    spec: g.specs[0] ? { refNo: g.specs[0].refNo, status: g.specs[0].status, revision: g.specs[0].revision, poms: g.specs[0].pomCount } : null,
+    bom: bom ? { refNo: bom.refNo, status: bom.status, lines: (bom.lines || []).length, unbooked: (bom.lines || []).filter((l) => !l.bookingRef).length, materialCostPerPc: bom.materialCostPerPc, costedMaterialPerPc: bom.costedMaterialPerPc, variancePerPc: bom.materialVariancePerPc } : null,
+    patterns: g.patterns.length, markers: mk.length,
+    markerConsumption: mk.length ? round(sum(mk, 'consumptionPerPc') / mk.length, 4) : 0,
+    markerVariancePct: mk.length ? round(sum(mk, 'consumptionVariancePct') / mk.length, 2) : 0,
+  };
+
   // T&A
   const tna = g.tna[0];
   st.tna = !g.tna.length ? P : g.tna.every((t) => t.status === 'Completed') ? D : g.tna.some((t) => num(t.delayedCount) > 0) ? L : A;
@@ -224,8 +248,10 @@ export async function computeStages(g) {
 
   const applicable = ordered.filter((w) => st[w.key] !== NA);
   const doneCount = applicable.filter((w) => st[w.key] === D).length;
-  // T&A is a running calendar until shipment – it never blocks the 'next process' pointer
-  const current = applicable.find((w) => st[w.key] !== D && w.key !== 'tna');
+  // T&A is a running calendar until shipment – it never blocks the 'next process' pointer;
+  // neither do open pre-production stages once cutting has started
+  const PRE = ['spec', 'bom', 'cad', 'pattern', 'grading', 'marker'];
+  const current = applicable.find((w) => st[w.key] !== D && w.key !== 'tna' && !(legacy && PRE.includes(w.key)));
 
   // Closure readiness
   const blockers = [];
@@ -274,7 +300,13 @@ export async function refreshJob(jobId, { notifyReady = true } = {}) {
   else if (!lc.readyToClose && job.status === 'Ready to Close') update.status = 'In Progress';
   else if (job.status === 'Confirmed' && lc.progressPct > 25) update.status = 'In Progress';
   if (job.isForecast && g.subJobs.length) update.orderQty = sum(g.subJobs, 'orderQty');
-  await Job.updateOne({ _id: job._id }, { $set: update });
+  // The status only moves if nobody changed it meanwhile (e.g. a close landing during a background refresh)
+  const { status, ...cache } = update;
+  await Job.updateOne({ _id: job._id }, { $set: cache });
+  if (status) {
+    const moved = await Job.updateOne({ _id: job._id, status: job.status }, { $set: { status } });
+    if (!moved.modifiedCount) delete update.status;
+  }
 
   if (notifyReady && lc.readyToClose && !job.readyToClose) {
     await notify({

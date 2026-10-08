@@ -19,6 +19,12 @@ const STAGE_RECORDS = {
   enquiry: ['enquiry', 'enquiry', (r) => fmtDate(r.enquiryDate)],
   costing: ['costing', 'costing', (r) => `Cost ${fmtNum(r.totalCostPerPc, 3)} · FOB ${fmtNum(r.sellingPrice, 3)} · ${r.profitPct}%`],
   quotation: ['quotation', 'quotation', (r) => `v${r.version} · ${fmtNum(r.price, 3)}`],
+  spec: ['techSpec', 'techSpec', (r) => `Rev ${r.revision || 1} · base ${r.baseSize || '—'} · ${r.pomCount || 0} POMs`],
+  bom: ['bom', 'bom', (r) => `Rev ${r.revision || 1} · ${(r.lines || []).length} lines · ${fmtNum(r.materialCostPerPc, 3)}/pc${r.materialVariancePerPc ? ` (${r.materialVariancePerPc > 0 ? '+' : ''}${fmtNum(r.materialVariancePerPc, 3)} vs costing)` : ''}`],
+  cad: ['pattern', 'pattern', (r) => `${r.patternNo} · ${r.cadSystem || 'CAD'} ${r.cadFileName ? `· ${r.cadFileName}` : ''}`],
+  pattern: ['pattern', 'pattern', (r) => `${r.patternNo} rev ${r.revision || 1} · ${r.patternType || ''}`],
+  grading: ['pattern', 'pattern', (r) => `${r.patternNo} · ${r.gradedSizes || 0} sizes graded`],
+  marker: ['marker', 'marker', (r) => `${r.markerNo} · ${r.ratio || ''} · ${fmtNum(r.consumptionPerPc, 4)}/pc${r.consumptionVariancePct ? ` (${r.consumptionVariancePct > 0 ? '+' : ''}${r.consumptionVariancePct}% vs BOM)` : ''}`],
   tna: ['tna', 'tna', (r) => `${r.completionPct}% complete · ${r.delayedCount} delayed`],
   ppMeeting: ['ppMeeting', 'ppMeeting', (r) => fmtDate(r.meetingDate)],
   fabric: ['fabricBooking', 'fabricBooking', (r) => `${r.fabricType} · req ${fmtNum(r.requiredQty, 1)} / rcvd ${fmtNum(r.receivedQty, 1)} ${r.unit}`],
@@ -38,12 +44,13 @@ const STAGE_RECORDS = {
 
 function JobSearch() {
   const nav = useNavigate();
+  const { user } = useAuth();
   return (
     <div>
-      <PageHead title="Job Control Tower" icon="RadioTower" subtitle="Enter a Job No to see the complete order journey – from buyer enquiry to job closure." />
+      <PageHead title={`Job 360 / Control Tower · ${user.unit.name}`} icon="RadioTower" subtitle="Enter a Job No to see the complete order journey – enquiry, specification, BOM, pattern, marker, production, shipment, accounts and closure." />
       <div className="card card-pad" style={{ maxWidth: 640 }}>
         <Field label="Job No / Style / PO / Buyer">
-          <RefSelect refModel="Job" onChange={() => {}} onPick={(it) => nav(`/jobs/${it.jobNo}`)} placeholder="e.g. GAR-2026-00001" />
+          <RefSelect refModel="Job" onChange={() => {}} onPick={(it) => nav(`/jobs/${it.jobNo}`)} placeholder={`e.g. ${user.unit.prefix}-${user.unit.code === 'U2' ? 3000 : 1000}`} />
         </Field>
       </div>
     </div>
@@ -128,7 +135,7 @@ function Tower({ jobNo }) {
         {isMain && <Badge tone="violet">Forecast main job</Badge>}
         {job.parentJobNo && <Badge tone="blue">Sub job of {job.parentJobNo}</Badge>}
         <button className="btn" onClick={() => setOpen({ def: MODULES.orders, id: job._id })}><Icon name="FileText" size={15} /> Order details</button>
-        {user.isAdmin && <button className="btn" onClick={regenerate} title="Generate any missing T&A, fabric, trims, PPM, samples, plan"><Icon name="RefreshCcw" size={15} /> Regenerate</button>}
+        {user.isAdmin && <button className="btn" onClick={regenerate} title="Generate any missing T&A, specification, BOM, fabric, trims, PPM, samples, plan"><Icon name="RefreshCcw" size={15} /> Regenerate</button>}
       </PageHead>
 
       {/* Headline */}
@@ -137,6 +144,8 @@ function Tower({ jobNo }) {
         <Kpi label="Overall Progress" value={job.progressPct} format={(v) => `${Math.round(v)}%`} icon="Activity" tone="green" sub={`Next: ${current?.label || 'Closure'}`} />
         <Kpi label="Shipment Date" value={fmtDate(job.shipmentDate)} icon="Ship" tone="blue" sub={job.destination} />
         {prod && <Kpi label="Cut / Sewn / Packed" value={`${fmtNum(prod.cut)} / ${fmtNum(prod.sewn)} / ${fmtNum(prod.packed)}`} icon="Factory" tone="accent" sub={`WIP ${fmtNum(prod.wip)}`} />}
+        {lc.meta.preproduction?.bom && <Kpi label="BOM Material / pc" value={fmtNum(lc.meta.preproduction.bom.materialCostPerPc, 3)} icon="ListTree" tone={lc.meta.preproduction.bom.variancePerPc > 0 ? 'amber' : 'green'} sub={lc.meta.preproduction.bom.costedMaterialPerPc ? `Costed ${fmtNum(lc.meta.preproduction.bom.costedMaterialPerPc, 3)}` : `${lc.meta.preproduction.bom.status}${lc.meta.preproduction.bom.unbooked ? ` · ${lc.meta.preproduction.bom.unbooked} unbooked` : ''}`} />}
+        {lc.meta.preproduction?.markers > 0 && <Kpi label="Marker Cons. / pc" value={fmtNum(lc.meta.preproduction.markerConsumption, 4)} icon="Ruler" tone={lc.meta.preproduction.markerVariancePct > 3 ? 'red' : 'green'} sub={`${lc.meta.preproduction.markerVariancePct > 0 ? '+' : ''}${lc.meta.preproduction.markerVariancePct}% vs BOM`} />}
         {lc.meta.fabric && <Kpi label="Fabric Received" value={`${fmtNum(lc.meta.fabric.received, 0)} / ${fmtNum(lc.meta.fabric.required, 0)}`} icon="Layers" tone={lc.meta.fabric.shortage > 0 ? 'amber' : 'green'} sub={lc.meta.fabric.shortage > 0 ? `Shortage ${fmtNum(lc.meta.fabric.shortage, 1)}` : 'No shortage'} />}
         {lc.meta.payment && <Kpi label="Payment" value={`${fmtNum(lc.meta.payment.received, 0)} / ${fmtNum(lc.meta.payment.invoiced, 0)}`} icon="Wallet" tone="violet" sub={`Outstanding ${fmtNum(lc.meta.payment.outstanding, 2)}`} />}
       </div>

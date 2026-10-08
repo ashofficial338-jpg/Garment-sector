@@ -16,6 +16,7 @@ export async function audit(req, { action, module, record, changes = [], message
       message,
       reason,
       ip: req?.ip,
+      ...(record?.businessUnit || req?.unit ? { businessUnit: record?.businessUnit || req.unit } : {}),
       userAgent: req?.headers?.['user-agent'],
     });
   } catch (e) {

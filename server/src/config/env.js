@@ -25,7 +25,6 @@ export const env = {
     password: process.env.ADMIN_PASSWORD,
     name: process.env.ADMIN_NAME || 'System Administrator',
   },
-  jobPrefix: process.env.JOB_PREFIX || 'GAR',
   trustProxy: Number(process.env.TRUST_PROXY ?? 1),
   maxUploadMb: Number(process.env.MAX_UPLOAD_MB) || 15,
 };

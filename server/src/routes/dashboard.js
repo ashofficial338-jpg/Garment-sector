@@ -1,7 +1,7 @@
 /** Company & department dashboards, KPIs and chart data. */
 import express from 'express';
 import { models } from '../modules/builder.js';
-import { permit } from '../middleware/auth.js';
+import { permit, scopeFromQuery } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { num, sum, round, pct } from '../../../shared/calc.js';
 import { User } from '../models/User.js';
@@ -12,14 +12,14 @@ const live = { isDeleted: false };
 const dayKey = (d) => new Date(d).toISOString().slice(0, 10);
 const monthKey = (d) => new Date(d).toISOString().slice(0, 7);
 
-r.get('/', permit('dashboard', 'view'), asyncHandler(async (req, res) => {
+r.get('/', permit('dashboard', 'view'), scopeFromQuery, asyncHandler(async (req, res) => {
   const now = new Date();
   const today = new Date(now.toDateString());
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const in14 = new Date(today.getTime() + 14 * 86400000);
   const M = models;
 
-  const [jobs, enquiries, costings, quotations, samples, fabric, trims, cutting, sewing, finishing, inspections, shipments, invoices, payments, expenses, tnas, lines, employees, userCount] = await Promise.all([
+  const [jobs, enquiries, costings, quotations, samples, fabric, trims, cutting, sewing, finishing, inspections, shipments, invoices, payments, expenses, tnas, lines, employees, userCount, specs, boms, patterns, markers] = await Promise.all([
     M.orders.find(live).lean(), M.enquiry.find(live).lean(), M.costing.find(live).lean(), M.quotation.find(live).lean(),
     M.sample.find(live).lean(), M.fabricBooking.find(live).lean(), M.trimBooking.find(live).lean(),
     M.cutting.find({ ...live, status: { $ne: 'Rejected' } }).lean(), M.sewing.find({ ...live, status: { $ne: 'Rejected' } }).lean(),
@@ -28,6 +28,8 @@ r.get('/', permit('dashboard', 'view'), asyncHandler(async (req, res) => {
     M.payment.find(live).lean(), M.expense.find({ ...live, status: { $ne: 'Rejected' } }).lean(), M.tna.find(live).lean(),
     M.master.countDocuments({ ...live, masterType: 'Production Line' }), M.employee.find(live).lean(),
     User.countDocuments({ isDeleted: false }),
+    M.techSpec.find(live).select('job status').lean(), M.bom.find(live).select('job status materialVariancePerPc lines.bookingRef').lean(),
+    M.pattern.find(live).select('job status').lean(), M.marker.find(live).select('job status consumptionVariancePct').lean(),
   ]);
 
   // Jobs that carry production (exclude forecast parents with sub jobs to avoid double counting)
@@ -60,7 +62,9 @@ r.get('/', permit('dashboard', 'view'), asyncHandler(async (req, res) => {
     pendingCosting: costings.filter((c) => ['Draft', 'Submitted', 'Under Review'].includes(c.status)).length,
     pendingApprovals: samples.filter((s) => ['Submitted', 'Buyer Review'].includes(s.status)).length
       + costings.filter((c) => ['Submitted', 'Under Review'].includes(c.status)).length
-      + quotations.filter((q) => ['Sent', 'Under Review'].includes(q.status)).length,
+      + quotations.filter((q) => ['Sent', 'Under Review'].includes(q.status)).length
+      + [...specs, ...boms, ...markers].filter((x) => x.status === 'Submitted').length
+      + patterns.filter((p) => p.status === 'Pattern Ready').length,
     fabricPending: fabric.filter((f) => num(f.shortageQty) > 0 && f.status !== 'Fabric Job Closed').length,
     productionRunning: active.filter((j) => ['cutting', 'sewing', 'finishing', 'packing'].includes(stageOf(j))).length,
     delayedJobs: delayedJobs.length,
@@ -76,7 +80,7 @@ r.get('/', permit('dashboard', 'view'), asyncHandler(async (req, res) => {
   const bucket = (j) => {
     if (j.status === 'Closed') return 'Closed';
     const s = stageOf(j);
-    if (['order', 'tna', 'ppMeeting', 'fabric', 'trims', 'sampling', 'approval'].includes(s)) return 'Order';
+    if (['order', 'spec', 'bom', 'tna', 'ppMeeting', 'cad', 'pattern', 'grading', 'marker', 'fabric', 'trims', 'sampling', 'approval'].includes(s)) return 'Order';
     if (['planning', 'cutting', 'sewing', 'finishing', 'packing', 'inspection'].includes(s)) return 'Production';
     if (['shipment', 'documentation'].includes(s)) return 'Shipment';
     return 'Payment';
@@ -125,6 +129,19 @@ r.get('/', permit('dashboard', 'view'), asyncHandler(async (req, res) => {
       readyToClose: fabric.filter((f) => String(f.closureVerdict || '').startsWith('READY')).length,
       trimShortages: trims.filter((t) => num(t.shortageQty) > 0 && num(t.receivedQty) > 0).length,
     },
+    preproduction: (() => {
+      const openJobs = new Set(active.map((j) => String(j._id)));
+      const mine = (rows) => rows.filter((x) => openJobs.has(String(x.job)));
+      const liveMarkers = mine(markers).filter((m) => m.status !== 'Rejected');
+      return {
+        specApprovedPct: pct(new Set(mine(specs).filter((x) => x.status === 'Approved').map((x) => String(x.job))).size, active.length),
+        bomApprovedPct: pct(new Set(mine(boms).filter((x) => x.status === 'Approved').map((x) => String(x.job))).size, active.length),
+        patternsPending: mine(patterns).filter((p) => !['Graded', 'Released'].includes(p.status)).length,
+        markersPending: liveMarkers.filter((m) => !['Approved', 'Issued to Cutting'].includes(m.status)).length,
+        markerVariancePct: liveMarkers.length ? round(sum(liveMarkers, 'consumptionVariancePct') / liveMarkers.length, 2) : 0,
+        unbookedBomLines: sum(mine(boms), (b) => (b.lines || []).filter((l) => !l.bookingRef).length),
+      };
+    })(),
     production: {
       lastDay: lastSewDay || null,
       dailyTarget: sum(daySew, 'targetQty'),

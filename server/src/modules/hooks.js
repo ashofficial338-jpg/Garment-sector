@@ -1,8 +1,9 @@
 /**
  * Server-side business rules per module (error prevention + data flow).
  *
- * beforeSave(ctx) – may mutate ctx.data, must throw ApiError to block.
- * afterSave(ctx)  – side effects (sync, notifications).
+ * beforeSave(ctx)   – may mutate ctx.data, must throw ApiError to block.
+ * beforeStatus(ctx) – stage gate for a status change (ctx.doc, ctx.to); throw / guard() to block.
+ * afterSave(ctx)    – side effects (sync, notifications).
  *
  * ctx = { def, data, existing, job, req, isCreate, override }
  *   override = true when the user has `override` permission AND supplied a reason.
@@ -12,7 +13,22 @@ import { ApiError } from '../utils/ApiError.js';
 import { notify } from '../services/notify.js';
 import { getSetting } from '../services/settings.js';
 import { num, sum, round, efficiency } from '../../../shared/calc.js';
+import { applyCompute, MODULES } from '../../../shared/modules/index.js';
+import { bomConsumptionFor, materialPerPcFromCosting } from '../../../shared/modules/preproduction.js';
 import { yarnAvailable, stageAvailable } from '../services/stock.js';
+import { completeTna, syncPpReadiness, PATTERN_DONE } from '../services/preproduction.js';
+import { createBookingsFromBom } from '../services/orderFlow.js';
+
+/** True when a save / status change moved the record into `status` (not already there). */
+const reached = (ctx, status) => ctx.saved?.status === status && ctx.existing?.status !== status;
+
+/** Same document number twice within one job is a data-entry error. */
+async function uniqueInJob(ctx, key, field, label) {
+  const v = ctx.data[field];
+  if (!v) return;
+  const dup = await models[key].exists({ job: ctx.job._id, isDeleted: false, [field]: v, revision: ctx.data.revision, _id: { $ne: ctx.existing?._id } });
+  if (dup) throw ApiError.conflict(`${label} ${v} (rev ${ctx.data.revision || 1}) already exists for ${ctx.job.jobNo}`);
+}
 
 const others = async (key, ctx, extra = {}) => models[key].find({
   job: ctx.job._id, isDeleted: false, _id: { $ne: ctx.existing?._id }, ...extra,
@@ -58,6 +74,120 @@ export const hooks = {
       if (ctx.isCreate && ctx.data.enquiry) {
         await models.enquiry.updateOne({ _id: ctx.data.enquiry, status: { $in: ['Pending', 'Under Review'] } }, { $set: { status: 'Costing' } });
       }
+    },
+  },
+
+  /* ---------------- Pre-production: Spec → BOM → CAD / Pattern → Grading → Marker ---------------- */
+  techSpec: {
+    async beforeStatus(ctx) {
+      if (['Submitted', 'Approved'].includes(ctx.to)) guard(ctx, (ctx.doc.measurements || []).some((m) => m.pom), 'Measurement chart is empty');
+    },
+    async afterSave(ctx) {
+      const d = ctx.saved;
+      if (reached(ctx, 'Approved')) {
+        if (!d.buyerApprovalDate) await models.techSpec.updateOne({ _id: d._id }, { $set: { buyerApprovalDate: new Date() } });
+        await completeTna(d.job, 'Tech Spec Approval');
+        await notify({ type: 'INFO', severity: 'success', title: `Specification approved – ${d.jobNo}`, message: `${d.refNo} rev ${d.revision || 1} approved. Pattern making can start from its measurement chart.`, departments: ['CAD / Pattern', 'Factory Merchandising'], job: ctx.job, module: 'techSpec', recordId: d._id, link: `/m/techSpec/${d._id}` });
+      }
+      await syncPpReadiness(d.job);
+    },
+  },
+  bom: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      if (!num(d.orderQty)) d.orderQty = ctx.job.orderQty;
+      // booking links are system-maintained: keep them across edits, and never orphan a booking
+      const prev = new Map((ctx.existing?.lines || []).map((l) => [String(l._id), l]));
+      d.lines = (d.lines || []).map((l) => ({ ...l, bookingRef: prev.get(String(l._id))?.bookingRef || null }));
+      const kept = new Set(d.lines.map((l) => String(l._id)));
+      const dropped = [...prev.values()].filter((l) => l.bookingRef && !kept.has(String(l._id)));
+      guard(ctx, !dropped.length, `Line(s) ${dropped.map((l) => `${l.item} (${l.bookingRef})`).join(', ')} already have bookings – cancel the booking instead of deleting the line`);
+      if (ctx.isCreate && !num(d.costedMaterialPerPc) && ctx.job.costing) {
+        d.costedMaterialPerPc = materialPerPcFromCosting(await models.costing.findById(ctx.job.costing).lean());
+      }
+    },
+    async beforeStatus(ctx) {
+      if (!['Submitted', 'Approved'].includes(ctx.to)) return;
+      const lines = ctx.doc.lines || [];
+      guard(ctx, lines.length > 0, 'BOM has no material lines');
+      const bad = lines.filter((l) => !l.item || !(num(l.consumptionPerPc) > 0));
+      guard(ctx, !bad.length, `${bad.length} BOM line(s) without item or consumption`);
+    },
+    async afterSave(ctx) {
+      const d = ctx.saved;
+      if (d.status === 'Approved') await createBookingsFromBom(d._id, ctx.req);
+      if (reached(ctx, 'Approved')) await completeTna(d.job, 'BOM Approval');
+    },
+  },
+  pattern: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      await uniqueInJob(ctx, 'pattern', 'patternNo', 'Pattern');
+      let spec = d.techSpec ? await models.techSpec.findById(d.techSpec).lean() : null;
+      if (!spec) {
+        const specs = await models.techSpec.find({ job: ctx.job._id, isDeleted: false }).sort({ revision: -1, createdAt: -1 }).lean();
+        spec = specs.find((x) => x.status === 'Approved') || specs[0];
+      }
+      if (!spec) return;
+      if (String(spec.job) !== String(ctx.job._id)) throw ApiError.badRequest('Specification belongs to a different job');
+      d.techSpec = spec._id;
+      // the spec's measurement chart is the grading source – no re-entry
+      if (!(d.gradeRules || []).length) d.gradeRules = (spec.measurements || []).map(({ pom, baseValue, gradeIncrement, tolerance }) => ({ pom, baseValue, gradeIncrement, tolerance }));
+      if (!(d.sizes || []).length) d.sizes = spec.sizes;
+      if (!d.baseSize) d.baseSize = spec.baseSize;
+    },
+    async beforeStatus(ctx) {
+      if (ctx.to === 'Pattern Approved') {
+        const ok = await models.techSpec.exists({ job: ctx.doc.job, isDeleted: false, status: 'Approved' });
+        guard(ctx, ok, 'Specification is not approved yet');
+      }
+      if (ctx.to === 'Graded') guard(ctx, (ctx.doc.gradeRules || []).length && (ctx.doc.sizes || []).length, 'Grade rules and sizes are required before grading is complete');
+    },
+    async afterSave(ctx) {
+      const d = ctx.saved;
+      if (reached(ctx, 'Pattern Approved')) {
+        if (!d.approvalDate) await models.pattern.updateOne({ _id: d._id }, { $set: { approvalDate: new Date() } });
+        await completeTna(d.job, 'Pattern Approval');
+      }
+      if (reached(ctx, 'Graded')) {
+        await completeTna(d.job, 'Grading');
+        await notify({ type: 'INFO', severity: 'info', title: `Pattern graded – ${d.jobNo}`, message: `${d.patternNo} graded for ${(d.sizes || []).join(', ')}. Ready for marker making.`, departments: ['CAD / Pattern', 'Cutting'], job: ctx.job, module: 'pattern', recordId: d._id, link: `/m/pattern/${d._id}` });
+      }
+      await syncPpReadiness(d.job);
+    },
+  },
+  marker: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      await uniqueInJob(ctx, 'marker', 'markerNo', 'Marker');
+      if (d.pattern) {
+        const p = await models.pattern.findById(d.pattern).lean();
+        if (!p || String(p.job) !== String(ctx.job._id)) throw ApiError.badRequest('Pattern belongs to a different job');
+      } else {
+        const p = await models.pattern.findOne({ job: ctx.job._id, isDeleted: false, status: { $in: PATTERN_DONE } }).sort({ createdAt: -1 }).lean();
+        if (p) d.pattern = p._id;
+      }
+      // marker consumption is checked against the BOM (or the order when no BOM line matches)
+      const bom = await models.bom.findOne({ job: ctx.job._id, isDeleted: false }).lean();
+      d.bomConsumption = bomConsumptionFor(bom, d.fabricType) || num(ctx.job.consumption);
+    },
+    async beforeStatus(ctx) {
+      if (ctx.to !== 'Approved') return;
+      const p = ctx.doc.pattern ? await models.pattern.findById(ctx.doc.pattern).lean() : null;
+      guard(ctx, p && ['Graded', 'Released'].includes(p.status), 'Marker needs a graded pattern before approval');
+    },
+    async afterSave(ctx) {
+      const d = ctx.saved;
+      if (reached(ctx, 'Approved')) await completeTna(d.job, 'Marker Ready');
+      if (Math.abs(num(d.consumptionVariancePct)) > 3 && num(d.consumptionPerPc) > 0) {
+        await notify({
+          type: 'INFO', severity: num(d.consumptionVariancePct) > 0 ? 'warning' : 'info', title: `Marker consumption ${num(d.consumptionVariancePct) > 0 ? 'above' : 'below'} BOM – ${d.jobNo}`,
+          message: `${d.markerNo}: ${d.consumptionPerPc} ${d.unit}/pc vs BOM ${d.bomConsumption} (${d.consumptionVariancePct > 0 ? '+' : ''}${d.consumptionVariancePct}%). Review fabric booking and costing.`,
+          departments: ['Fabric Department', 'Costing Factory', 'Factory Merchandising'], job: ctx.job, module: 'marker', recordId: d._id,
+          link: `/m/marker/${d._id}`, dedupeKey: `mkr-var-${d._id}-${d.consumptionPerPc}`,
+        });
+      }
+      await syncPpReadiness(d.job);
     },
   },
 
@@ -146,6 +276,16 @@ export const hooks = {
   /* ---------------- Production ---------------- */
   cutting: {
     async beforeSave(ctx) {
+      if (ctx.data.marker) {
+        // the approved marker is the source for lay data – no re-entry
+        const m = await models.marker.findById(ctx.data.marker).lean();
+        if (!m || m.isDeleted || String(m.job) !== String(ctx.job._id)) throw ApiError.badRequest('Marker belongs to a different job');
+        guard(ctx, ['Approved', 'Issued to Cutting'].includes(m.status), `Marker ${m.markerNo} is not approved (${m.status})`);
+        Object.assign(ctx.data, { markerNo: m.markerNo, markerLength: m.markerLength, markerWidth: m.markerWidth, markerEfficiencyPct: m.markerEfficiencyPct });
+        if (!ctx.data.ratio) ctx.data.ratio = m.ratio;
+        if (!ctx.data.color) ctx.data.color = m.color;
+        ctx.data = applyCompute(MODULES.cutting, ctx.data);
+      }
       const tol = await getSetting('tolerance');
       const prev = sum(await others('cutting', ctx, { status: { $ne: 'Rejected' } }), 'cutQty');
       const limit = num(ctx.job.orderQty) * (1 + num(tol.overCutPct) / 100);
@@ -154,6 +294,16 @@ export const hooks = {
       const fabricIssued = sum(await models.fabricBooking.find({ job: ctx.job._id, isDeleted: false }).lean(), 'issuedQty');
       const fabricUsedPrev = sum(await others('cutting', ctx), 'fabricUsed');
       if (fabricIssued > 0) guard(ctx, fabricUsedPrev + num(ctx.data.fabricUsed) <= fabricIssued, `Fabric used in cutting (${round(fabricUsedPrev + num(ctx.data.fabricUsed))}) exceeds fabric issued (${fabricIssued})`);
+    },
+    async afterSave(ctx) {
+      const d = ctx.saved;
+      if (!d.marker || d.status === 'Rejected') return;
+      const m = await models.marker.findById(d.marker);
+      if (m?.status === 'Approved') {
+        m.statusHistory.push({ from: 'Approved', to: 'Issued to Cutting', by: ctx.req.user?._id, byName: ctx.req.user?.name, reason: `Used by cutting ${d.refNo}` });
+        m.status = 'Issued to Cutting';
+        await m.save();
+      }
     },
   },
   sewing: {

@@ -4,7 +4,7 @@ import { CURRENCIES, DEPARTMENTS } from '../constants.js';
 const active = flow(['Active', 'Inactive'], { Inactive: ['Active'] });
 
 export const buyer = {
-  key: 'buyer', model: 'Buyer', title: 'Buyers', singular: 'Buyer', group: 'Master Data', icon: 'Building2',
+  key: 'buyer', model: 'Buyer', sharedAcrossUnits: true, title: 'Buyers', singular: 'Buyer', group: 'Master Data', icon: 'Building2',
   department: 'Head Office Merchandising', prefix: 'BUY', jobLinked: false, ...active, defaultStatus: 'Active',
   fields: [
     text('name', 'Buyer Name', { required: true, list: true, search: true }),
@@ -20,7 +20,7 @@ export const buyer = {
 };
 
 export const supplier = {
-  key: 'supplier', model: 'Supplier', title: 'Suppliers', singular: 'Supplier', group: 'Master Data', icon: 'Truck',
+  key: 'supplier', model: 'Supplier', sharedAcrossUnits: true, title: 'Suppliers', singular: 'Supplier', group: 'Master Data', icon: 'Truck',
   department: 'Fabric Department', prefix: 'SUP', jobLinked: false, ...active, defaultStatus: 'Active',
   fields: [
     text('name', 'Supplier Name', { required: true, list: true, search: true }),
@@ -40,7 +40,7 @@ export const MASTER_TYPES = [
 ];
 
 export const master = {
-  key: 'master', model: 'MasterData', title: 'Master Data', singular: 'Master Record', group: 'Master Data', icon: 'Database',
+  key: 'master', model: 'MasterData', sharedAcrossUnits: true, title: 'Master Data', singular: 'Master Record', group: 'Master Data', icon: 'Database',
   department: 'Admin', prefix: 'MST', jobLinked: false, ...active, defaultStatus: 'Active',
   fields: [
     sel('masterType', 'Master Type', MASTER_TYPES, { required: true, list: true, filter: true }),

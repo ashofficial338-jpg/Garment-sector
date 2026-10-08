@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, LineChart, Line } from 'recharts';
 import { api, errMsg } from '../api.js';
 import { useAuth } from '../auth/AuthContext.jsx';
+import { UnitScope, useUnitName } from '../components/UnitScope.jsx';
 import { useFeedback } from '../components/Feedback.jsx';
 import { Kpi, Card, Icon, Loading, StatusBadge, Progress, Badge, Empty } from '../components/ui.jsx';
 import { ChartBox, ChartTooltip, ChartLegend, useChartTheme } from '../components/Charts.jsx';
@@ -10,8 +11,9 @@ import { fmtCompact, fmtDate, fmtNum, STAGE_LABEL } from '../utils/format.js';
 
 /** Which KPI sections each department dashboard shows */
 export const DASHBOARDS = {
-  admin: { title: 'Company Overview', sections: ['merchandising', 'fabric', 'production', 'quality', 'shipment', 'accounts', 'finance'] },
-  merchandising: { title: 'Merchandising', sections: ['merchandising', 'fabric', 'production', 'shipment'] },
+  admin: { title: 'Company Overview', sections: ['merchandising', 'preproduction', 'fabric', 'production', 'quality', 'shipment', 'accounts', 'finance'] },
+  merchandising: { title: 'Merchandising', sections: ['merchandising', 'preproduction', 'fabric', 'production', 'shipment'] },
+  preproduction: { title: 'CAD / Pattern', sections: ['preproduction', 'fabric', 'production'] },
   costing: { title: 'Costing', sections: ['merchandising', 'finance'] },
   fabric: { title: 'Fabric Department', sections: ['fabric'] },
   production: { title: 'Production', sections: ['production', 'quality'] },
@@ -30,6 +32,13 @@ function KpiSection({ name, k }) {
       ['Order Conversion', k.merchandising.orderConversionPct, '%', 'Target', 'primary', 1],
       ['On-time Approval', k.merchandising.onTimeApprovalPct, '%', 'BadgeCheck', 'green', 1],
       ['T&A Delayed Activities', k.merchandising.tnaDelayedActivities, '', 'CalendarX', 'red', 0, `avg ${k.merchandising.avgTnaDelayDays} days late`, '/reports?r=tna'],
+    ]],
+    preproduction: ['Pre-Production', 'DraftingCompass', [
+      ['Spec Approved', k.preproduction.specApprovedPct, '%', 'FileCog', 'primary', 1, 'of active jobs', '/m/techSpec'],
+      ['BOM Approved', k.preproduction.bomApprovedPct, '%', 'ListTree', 'accent', 1, k.preproduction.unbookedBomLines ? `${k.preproduction.unbookedBomLines} lines not booked` : 'all lines booked', '/reports?r=bom'],
+      ['Patterns Pending', k.preproduction.patternsPending, '', 'DraftingCompass', 'amber', 0, 'not yet graded', '/m/pattern'],
+      ['Markers Pending', k.preproduction.markersPending, '', 'Ruler', 'blue', 0, '', '/m/marker'],
+      ['Marker vs BOM', k.preproduction.markerVariancePct, '%', 'Scale', k.preproduction.markerVariancePct > 3 ? 'red' : 'green', 2, 'avg consumption variance', '/reports?r=marker'],
     ]],
     fabric: ['Fabric', 'Layers', [
       ['Fabric Booked', k.fabric.bookingPct, '%', 'BookCheck', 'primary', 1],
@@ -119,13 +128,15 @@ export function JobMiniTable({ rows, empty }) {
 
 export default function Dashboard({ focus }) {
   const { user } = useAuth();
+  const unitName = useUnitName();
+  const [scope, setScope] = useState('');
   const { toast } = useFeedback();
   const nav = useNavigate();
   const t = useChartTheme();
   const [d, setD] = useState(null);
   const cfg = DASHBOARDS[focus || 'admin'];
 
-  useEffect(() => { api.get('/dashboard').then((r) => setD(r.data)).catch((e) => toast(errMsg(e), 'err')); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setD(null); api.get('/dashboard', { params: { unit: scope || undefined } }).then((r) => setD(r.data)).catch((e) => toast(errMsg(e), 'err')); }, [scope]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!d) return <Loading />;
   const s = d.summary;
   const hour = new Date().getHours();
@@ -141,9 +152,10 @@ export default function Dashboard({ focus }) {
         <div className="row-wrap" style={{ justifyContent: 'space-between' }}>
           <div>
             <h1>Good {hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening'}, {user.name.split(' ')[0]}</h1>
-            <p>{focus ? `${cfg.title} dashboard` : 'Company-wide order to shipment overview'} · {new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
+            <p>{scope === 'ALL' ? 'Both units – consolidated' : (unitName(scope) || user.unit.name).toUpperCase()} · {focus ? `${cfg.title} dashboard` : 'Order to shipment overview'} · {new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
           </div>
           <div className="row-wrap">
+            <UnitScope value={scope} onChange={setScope} style={{ height: 36, width: 'auto' }} />
             <button className="btn" onClick={() => nav('/control-tower')}><Icon name="RadioTower" size={15} /> Track a Job</button>
             <button className="btn btn-primary" style={{ background: '#fff', color: '#312e81', borderColor: '#fff' }} onClick={() => nav('/m/orders')}><Icon name="ClipboardCheck" size={15} /> Orders</button>
           </div>

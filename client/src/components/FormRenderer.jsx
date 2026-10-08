@@ -79,7 +79,7 @@ function TagsInput({ value = [], onChange, disabled }) {
 }
 
 /* --------------------------- Single input --------------------------- */
-export function FieldInput({ f, value, onChange, disabled }) {
+export function FieldInput({ f, value, onChange, disabled, params }) {
   if (f.readOnly) {
     const show = f.type === 'date' ? toInputDate(value) : f.type === 'number' ? (value === null || value === undefined || value === '' ? '' : fmtSmart(value)) : value ?? '';
     return <input className="calc" readOnly value={show} tabIndex={-1} />;
@@ -95,7 +95,7 @@ export function FieldInput({ f, value, onChange, disabled }) {
       </select>
     );
     case 'boolean': return <label className="check"><input type="checkbox" checked={!!value} disabled={disabled} onChange={(e) => onChange(e.target.checked)} /> {f.label}</label>;
-    case 'ref': return <RefSelect refModel={f.ref} value={value} onChange={onChange} disabled={disabled} />;
+    case 'ref': return <RefSelect refModel={f.ref} value={value} onChange={onChange} disabled={disabled} params={params} />;
     case 'tags': return <TagsInput value={value || []} onChange={onChange} disabled={disabled} />;
     default: return <input value={value ?? ''} disabled={disabled} onChange={(e) => onChange(e.target.value)} />;
   }
@@ -146,7 +146,7 @@ export function TableField({ f, value = [], onChange, disabled, errors = {} }) {
 }
 
 /* --------------------------- Whole form --------------------------- */
-export function FormRenderer({ def, values, onChange, errors = {}, disabled, hide = [] }) {
+export function FormRenderer({ def, values, onChange, errors = {}, disabled, hide = [], jobNo }) {
   const sections = useMemo(() => {
     const out = [];
     let cur = { title: null, fields: [] };
@@ -168,12 +168,12 @@ export function FormRenderer({ def, values, onChange, errors = {}, disabled, hid
             {s.fields.map((f) => (
               f.type === 'table' ? (
                 <div key={f.name} className="span-2">
-                  <div className="field"><label>{f.label}</label></div>
+                  <div className="field"><label>{f.label}</label>{f.hint && <div className="muted small">{f.hint}</div>}</div>
                   <TableField f={f} value={values[f.name]} disabled={disabled} errors={errors} onChange={(v) => onChange(f.name, v)} />
                 </div>
               ) : (
                 <Field key={f.name} label={f.type === 'boolean' ? '' : f.label} required={f.required && !f.readOnly} error={errors[f.name]} hint={f.hint} span={f.span === 2}>
-                  <FieldInput f={f} value={values[f.name]} disabled={disabled} onChange={(v) => onChange(f.name, v)} />
+                  <FieldInput f={f} value={values[f.name]} disabled={disabled} onChange={(v) => onChange(f.name, v)} params={f.jobScoped && jobNo ? { job: jobNo } : undefined} />
                 </Field>
               )
             ))}

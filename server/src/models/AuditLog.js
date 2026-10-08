@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { unitScoped } from '../services/unitContext.js';
 
 const auditSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
@@ -15,5 +16,6 @@ const auditSchema = new mongoose.Schema({
   userAgent: String,
 }, { timestamps: { createdAt: true, updatedAt: false } });
 auditSchema.index({ createdAt: -1 });
+auditSchema.plugin(unitScoped);
 
 export const AuditLog = mongoose.model('AuditLog', auditSchema);

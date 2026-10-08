@@ -119,6 +119,33 @@ function Notifications() {
   );
 }
 
+/** "Current Unit: UNIT-1" – shown on every page; Switch Unit only for users assigned to several units. */
+function CurrentUnit() {
+  const { user, selectUnit } = useAuth();
+  const [open, setOpen] = useState(false);
+  const box = useRef(null);
+  useEffect(() => {
+    const c = (e) => box.current && !box.current.contains(e.target) && setOpen(false);
+    document.addEventListener('mousedown', c);
+    return () => document.removeEventListener('mousedown', c);
+  }, []);
+  const others = user.units.filter((u) => u.code !== user.unit.code);
+  return (
+    <div style={{ position: 'relative' }} ref={box}>
+      <button className="unit-pill" style={{ cursor: others.length ? 'pointer' : 'default' }} onClick={() => others.length && setOpen(!open)} title={others.length ? 'Switch unit' : undefined}>
+        <Icon name="Factory" size={14} /><span className="hide-sm">Current Unit:</span> <b>{user.unit.name.toUpperCase()}</b>
+        {others.length > 0 && <Icon name="ArrowLeftRight" size={13} />}
+      </button>
+      {open && (
+        <div className="search-pop" style={{ left: 'auto', right: 0, width: 240 }}>
+          <div className="muted small" style={{ padding: '8px 12px' }}>Switch unit – the app reloads with that unit's data</div>
+          {others.map((u) => <div key={u.code} className="search-item" onClick={() => selectUnit(u.code)}><Icon name="Factory" size={16} /> {u.name.toUpperCase()} <span className="muted small mono">{u.prefix}-…</span></div>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UserMenu() {
   const { user, logout } = useAuth();
   const [open, setOpen] = useState(false);
@@ -172,7 +199,7 @@ export default function Layout() {
           <div className="brand-logo">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinejoin="round"><path d="M8 3 5 5 2 9l3 3 2-1v10h10V11l2 1 3-3-3-4-3-2c-.5 1.5-2 2.5-4 2.5S8.5 4.5 8 3Z" /></svg>
           </div>
-          <div><b>StitchFlow ERP</b><small>Order → Shipment</small></div>
+          <div><b>StitchFlow ERP</b><small>{user.unit.name.toUpperCase()} · Order → Shipment</small></div>
         </div>
         <nav className="nav">
           {NAV.map((g) => {
@@ -199,6 +226,7 @@ export default function Layout() {
           <button className="btn btn-ghost btn-icon menu-btn" onClick={() => setOpen(true)} aria-label="Menu"><Icon name="Menu" /></button>
           <GlobalSearch />
           <div className="grow" />
+          <CurrentUnit />
           <Notifications />
           <UserMenu />
         </header>

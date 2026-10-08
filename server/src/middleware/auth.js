@@ -2,7 +2,8 @@ import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
 import { User } from '../models/User.js';
 import { ApiError } from '../utils/ApiError.js';
-import { effectivePermissions, can } from '../services/permissions.js';
+import { effectivePermissions, can, allowedUnits } from '../services/permissions.js';
+import { unitContext, ALL_UNITS } from '../services/unitContext.js';
 
 /**
  * Short-lived cache of authenticated users (with role) – saves two database round trips per request.
@@ -41,6 +42,9 @@ export async function authenticate(req, _res, next) {
     }
     req.user = user;
     req.perms = effectivePermissions(user);
+    req.units = allowedUnits(user);
+    // the unit chosen at login travels in the access token; it must still be assigned to the user
+    req.unit = req.units.includes(payload.unit) ? payload.unit : null;
     next();
   } catch (e) {
     next(e);
@@ -51,6 +55,38 @@ export async function authenticate(req, _res, next) {
 export function requirePasswordFresh(req, _res, next) {
   if (req.user?.mustChangePassword) return next(new ApiError(403, 'Password change required', { code: 'PASSWORD_CHANGE_REQUIRED' }));
   next();
+}
+
+/**
+ * Every business request runs in the selected unit: queries and new records are scoped to it
+ * (see services/unitContext.js). Without a selected unit the client must show "Select Unit".
+ */
+export function requireUnit(req, res, next) {
+  if (!req.unit) return next(new ApiError(403, 'Select a unit to continue', { code: 'UNIT_REQUIRED' }));
+  return unitContext(req.unit)(req, res, next);
+}
+
+/**
+ * Report / dashboard / audit scope chosen by the user: current unit (default), another assigned unit,
+ * or ALL (consolidated – only for users assigned to every unit). Returns a unit code or ALL_UNITS.
+ */
+export function readScope(req) {
+  const want = String(req.query.unit || '').trim();
+  if (!want || want === req.unit) return req.unit;
+  if (want === 'ALL') {
+    if (req.units.length < 2) throw ApiError.forbidden('Consolidated view needs access to both units');
+    return ALL_UNITS;
+  }
+  if (!req.units.includes(want)) throw ApiError.forbidden(`No access to unit ${want}`);
+  return want;
+}
+
+/** Run a read-only route in the scope requested with ?unit= (current unit, another assigned unit, or ALL). */
+export function scopeFromQuery(req, res, next) {
+  let scope;
+  try { scope = readScope(req); } catch (e) { return next(e); }
+  req.scope = scope;
+  return unitContext(scope)(req, res, next);
 }
 
 /** Backend permission guard – never rely on the UI alone. */

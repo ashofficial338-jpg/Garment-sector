@@ -32,7 +32,8 @@ export const timeAgo = (v) => {
   return `${Math.floor(s / 86400)}d ago`;
 };
 export const STAGE_LABEL = {
-  enquiry: 'Enquiry', costing: 'Costing', quotation: 'Quotation', order: 'Order', tna: 'T&A', ppMeeting: 'PP Meeting',
+  enquiry: 'Enquiry', costing: 'Costing', quotation: 'Quotation', order: 'Order', spec: 'Spec', bom: 'BOM',
+  cad: 'CAD', pattern: 'Pattern', grading: 'Grading', marker: 'Marker', tna: 'T&A', ppMeeting: 'PP Meeting',
   fabric: 'Fabric', trims: 'Trims', sampling: 'Sampling', approval: 'Approval', planning: 'Planning', cutting: 'Cutting',
   sewing: 'Sewing', finishing: 'Finishing', packing: 'Packing', inspection: 'Inspection', shipment: 'Shipment',
   documentation: 'Documentation', accounts: 'Accounts', payment: 'Payment', profit: 'Profit', closure: 'Closure',

@@ -19,9 +19,22 @@ api.interceptors.request.use((cfg) => {
   return cfg;
 });
 
+// The backend (free Render instance) can drop connections while waking up; retry those
+// instead of treating them as "logged out". A real 401 is not retried.
+const transient = (e) => !e.response || [502, 503, 504].includes(e.response.status);
+async function postRefresh(attempt = 0) {
+  try {
+    return await axios.post('/api/auth/refresh', {}, { withCredentials: true });
+  } catch (e) {
+    if (attempt >= 3 || !transient(e)) throw e;
+    await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+    return postRefresh(attempt + 1);
+  }
+}
+
 export async function refreshSession() {
   if (!refreshing) {
-    refreshing = axios.post('/api/auth/refresh', {}, { withCredentials: true })
+    refreshing = postRefresh()
       .then((r) => { accessToken = r.data.accessToken; emit({ type: 'refreshed', user: r.data.user }); return r.data; })
       .finally(() => { refreshing = null; });
   }
@@ -42,6 +55,7 @@ api.interceptors.response.use(
       }
     }
     if (response?.status === 403 && response.data?.details?.code === 'PASSWORD_CHANGE_REQUIRED') emit({ type: 'password' });
+    if (response?.status === 403 && response.data?.details?.code === 'UNIT_REQUIRED') emit({ type: 'unit' });
     return Promise.reject(err);
   },
 );

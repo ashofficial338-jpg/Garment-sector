@@ -1,4 +1,4 @@
-import { text, area, n, calc, date, sel, table, flow } from './dsl.js';
+import { text, area, n, calc, date, sel, ref, table, flow } from './dsl.js';
 import { parseRatio, efficiency, dhu, packingTotals, aqlEvaluate, aqlSampleSize, AQL_LEVELS, num, round, pct, sum } from '../calc.js';
 
 const entryFlow = flow(['Submitted', 'Approved'], { Submitted: ['Rejected'], Rejected: ['Submitted'] });
@@ -10,6 +10,7 @@ export const cutting = {
   ...entryFlow, defaultStatus: 'Submitted',
   fields: [
     date('entryDate', 'Cutting Date', { required: true, list: true, section: 'Lay / Marker' }),
+    ref('marker', 'Marker', 'Marker', { jobScoped: true, hint: 'An approved marker fills marker no, length, width, efficiency and ratio' }),
     text('layNo', 'Lay No', { list: true }), text('markerNo', 'Marker No'),
     n('markerLength', 'Marker Length'), n('markerWidth', 'Marker Width (inch)'), n('markerEfficiencyPct', 'Marker Efficiency %', { max: 100 }),
     text('color', 'Color', { list: true, filter: true }),

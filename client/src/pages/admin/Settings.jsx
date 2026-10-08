@@ -27,13 +27,11 @@ export default function Settings() {
   const move = (i, d) => { const a = [...wf]; const [x] = a.splice(i, 1); a.splice(i + d, 0, x); setS({ ...s, workflow: a }); };
   const setObj = (key, k, v) => setS({ ...s, [key]: { ...s[key], [k]: v } });
   const SaveBtn = ({ k }) => !ro && <button className="btn btn-primary" onClick={() => save(k)}><Icon name="Save" size={15} /> Save</button>;
-  const jn = s.jobNumber;
-  const preview = [jn.prefix, jn.includeYear ? new Date().getFullYear() : null, '1'.padStart(jn.digits, '0')].filter(Boolean).join(jn.separator);
 
   return (
     <div>
       <PageHead title="Workflow & System Settings" icon="Workflow" subtitle="Configure process sequence, responsibility, approvals, required documents, closure conditions, numbering, tolerances and alerts." />
-      <Tabs value={tab} onChange={setTab} tabs={[{ key: 'workflow', label: 'Workflow engine' }, { key: 'numbering', label: 'Job numbering' }, { key: 'tolerance', label: 'Tolerances' }, { key: 'notifications', label: 'Notification rules' }, { key: 'company', label: 'Company' }]} />
+      <Tabs value={tab} onChange={setTab} tabs={[{ key: 'workflow', label: 'Workflow engine' }, { key: 'numbering', label: 'Units & job numbering' }, { key: 'tolerance', label: 'Tolerances' }, { key: 'notifications', label: 'Notification rules' }, { key: 'company', label: 'Company' }]} />
 
       {tab === 'workflow' && (
         <Card title="Process sequence" icon="Workflow" actions={<SaveBtn k="workflow" />} pad={false}>
@@ -64,14 +62,8 @@ export default function Settings() {
       )}
 
       {tab === 'numbering' && (
-        <Card title="Job number format" icon="Hash" actions={<SaveBtn k="jobNumber" />}>
-          <div className="form-grid">
-            <Field label="Prefix"><input disabled={ro} value={jn.prefix} onChange={(e) => setObj('jobNumber', 'prefix', e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))} /></Field>
-            <Field label="Digits"><input disabled={ro} type="number" min={3} max={8} value={jn.digits} onChange={(e) => setObj('jobNumber', 'digits', Number(e.target.value))} /></Field>
-            <Field label="Separator"><select disabled={ro} value={jn.separator} onChange={(e) => setObj('jobNumber', 'separator', e.target.value)}><option>-</option><option>/</option></select></Field>
-            <Field label=" "><label className="check"><input type="checkbox" disabled={ro} checked={jn.includeYear} onChange={(e) => setObj('jobNumber', 'includeYear', e.target.checked)} /> Include year (resets yearly)</label></Field>
-          </div>
-          <div className="alert alert-info mt"><Icon name="Hash" size={16} /> Next jobs will look like <b className="mono">{preview}</b>. Sub jobs: <b className="mono">{preview}-{s.subJob.prefix}01</b></div>
+        <Card title="Units & job number series" icon="Factory">
+          <UnitSeries ro={ro} subJob={s.subJob} />
           <div className="form-grid mt">
             <Field label="Sub job prefix"><input disabled={ro} value={s.subJob.prefix} onChange={(e) => setObj('subJob', 'prefix', e.target.value.toUpperCase())} /></Field>
             <Field label="Sub job digits"><input disabled={ro} type="number" value={s.subJob.digits} onChange={(e) => setObj('subJob', 'digits', Number(e.target.value))} /></Field>
@@ -111,6 +103,45 @@ export default function Settings() {
           </div>
         </Card>
       )}
+    </div>
+  );
+}
+
+/** One ERP, two units: each unit has its own job number series (U1-1000…, U2-3000…). */
+function UnitSeries({ ro, subJob }) {
+  const { toast } = useFeedback();
+  const [rows, setRows] = useState(null);
+  const [edit, setEdit] = useState({});
+  const load = () => api.get('/admin/units').then((r) => { setRows(r.data.rows); setEdit({}); }).catch((e) => toast(errMsg(e), 'err'));
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!rows) return <Loading />;
+  const set = (code, k, v) => setEdit({ ...edit, [code]: { ...edit[code], [k]: v } });
+  const save = async (u) => {
+    try { await api.put(`/admin/units/${u.code}`, edit[u.code]); toast(`${u.code} updated`); load(); } catch (e) { toast(errMsg(e), 'err'); }
+  };
+  return (
+    <div>
+      <div className="muted small mb">Both units run the same modules, workflow and calculations; their jobs, transactions, users and reports are kept separate. A series can only move forward, so issued Job Nos are never reused.</div>
+      <div className="table-wrap">
+        <table className="tbl tbl-mini">
+          <thead><tr><th>Code</th><th>Unit name</th><th>Series</th><th className="num">Start</th><th>Next Job No</th><th className="num">Jobs</th><th className="num">Open</th><th className="num">Users</th>{!ro && <th />}</tr></thead>
+          <tbody>{rows.map((u) => {
+            const e = edit[u.code] || {};
+            return (
+              <tr key={u.code}>
+                <td><Badge tone="primary" dot={false}>{u.code}</Badge></td>
+                <td><input disabled={ro} value={e.name ?? u.name} onChange={(x) => set(u.code, 'name', x.target.value)} style={{ minWidth: 140 }} /></td>
+                <td className="mono">{u.prefix}-####</td>
+                <td className="num">{u.start}</td>
+                <td><div className="row"><span className="mono muted">{u.prefix}-</span><input disabled={ro} type="number" min={u.nextJobNo} value={e.nextJobNo ?? u.nextJobNo} onChange={(x) => set(u.code, 'nextJobNo', x.target.value)} style={{ width: 110 }} /></div></td>
+                <td className="num">{u.jobs}</td><td className="num">{u.openJobs}</td><td className="num">{u.users}</td>
+                {!ro && <td><button className="btn btn-sm btn-primary" disabled={!edit[u.code]} onClick={() => save(u)}><Icon name="Save" size={14} /> Save</button></td>}
+              </tr>
+            );
+          })}</tbody>
+        </table>
+      </div>
+      <div className="alert alert-info mt"><Icon name="Hash" size={16} /> Next jobs: {rows.map((u) => <b key={u.code} className="mono" style={{ marginRight: 12 }}>{u.prefix}-{edit[u.code]?.nextJobNo || u.nextJobNo}</b>)} · Forecast sub jobs: <b className="mono">{rows[0].prefix}-{rows[0].nextJobNo}-{subJob.prefix}01</b></div>
     </div>
   );
 }

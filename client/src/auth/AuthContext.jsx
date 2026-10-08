@@ -13,6 +13,7 @@ export function AuthProvider({ children }) {
       if (evt.type === 'logout') { setAccessToken(null); setUser(null); }
       if (evt.type === 'refreshed') setUser(evt.user);
       if (evt.type === 'password') setUser((u) => (u ? { ...u, mustChangePassword: true } : u));
+      if (evt.type === 'unit') setUser((u) => (u ? { ...u, unit: null } : u));
     });
   }, []);
 
@@ -22,6 +23,16 @@ export function AuthProvider({ children }) {
     setUser(data.user);
     return data.user;
   }, []);
+
+  /** Step 2 of login and "Switch Unit": bind this session to a unit. */
+  const selectUnit = useCallback(async (unit) => {
+    const switching = !!user?.unit;
+    const { data } = await api.post('/auth/select-unit', { unit });
+    setAccessToken(data.accessToken);
+    // a switch reloads the app so no screen keeps the previous unit's data
+    if (switching) { window.location.assign('/'); return; }
+    setUser(data.user);
+  }, [user]);
 
   const changePassword = useCallback(async (currentPassword, newPassword) => {
     const { data } = await api.post('/auth/change-password', { currentPassword, newPassword });
@@ -38,7 +49,7 @@ export function AuthProvider({ children }) {
   /** Frontend permission check (UX only – the API enforces permissions independently). */
   const can = useCallback((module, action = 'view') => !!user && (user.isAdmin || (user.permissions?.[module] || []).includes(action)), [user]);
 
-  const value = useMemo(() => ({ user, ready, login, logout, changePassword, can }), [user, ready, login, logout, changePassword, can]);
+  const value = useMemo(() => ({ user, ready, login, logout, changePassword, selectUnit, can }), [user, ready, login, logout, changePassword, selectUnit, can]);
   return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;
 }
 

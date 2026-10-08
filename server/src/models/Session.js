@@ -9,6 +9,8 @@ const sessionSchema = new mongoose.Schema({
   replacedBy: String,
   ip: String,
   userAgent: String,
+  /** Business unit selected for this login session (carried across token refreshes) */
+  unit: String,
 }, { timestamps: true });
 sessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 

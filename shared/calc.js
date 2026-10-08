@@ -47,6 +47,64 @@ export function kgToMeters(kg, gsm, widthInch) {
   return d ? round((num(kg) * 1000) / d, 3) : 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Pre-production: BOM, grading, marker                                */
+/* ------------------------------------------------------------------ */
+
+/** One BOM line: required qty for the order (incl. wastage) and its value. Fabric keeps decimals, trims round up. */
+export function bomLine(l = {}, orderQty = 0) {
+  const gross = num(orderQty) * num(l.consumptionPerPc) * (1 + num(l.wastagePct) / 100);
+  const requiredQty = l.category === 'Fabric' ? round(gross, 3) : Math.ceil(gross - 1e-9);
+  return {
+    requiredQty,
+    amount: round(requiredQty * num(l.rate), 2),
+    costPerPc: round(num(l.consumptionPerPc) * (1 + num(l.wastagePct) / 100) * num(l.rate), 4),
+  };
+}
+
+export function bomTotals(lines = [], orderQty = 0) {
+  const rows = lines.map((l) => ({ ...l, ...bomLine(l, orderQty) }));
+  const of = (cats) => rows.filter((r) => cats.includes(r.category));
+  return {
+    lines: rows,
+    fabricCostPerPc: round(sum(of(['Fabric']), 'costPerPc'), 4),
+    trimCostPerPc: round(sum(of(['Trim', 'Accessory', 'Packing']), 'costPerPc'), 4),
+    materialCostPerPc: round(sum(rows, 'costPerPc'), 4),
+    totalMaterialValue: round(sum(rows, 'amount'), 2),
+    fabricLines: of(['Fabric']).length,
+    trimLines: rows.length - of(['Fabric']).length,
+  };
+}
+
+/** Graded measurement of one point of measure across sizes: base ± increment per size step from the base size. */
+export function gradeRow(rule = {}, sizes = [], baseSize = '') {
+  if (!sizes.length) return '';
+  const baseIdx = Math.max(sizes.indexOf(baseSize), 0);
+  return sizes.map((s, i) => `${s} ${round(num(rule.baseValue) + (i - baseIdx) * num(rule.gradeIncrement), 2)}`).join(' · ');
+}
+
+/**
+ * Marker plan: garments per marker from the size ratio, planned cut qty from plies, and the
+ * marker consumption per garment converted to the fabric unit (Meter / Yard / KG via GSM & width).
+ */
+export function markerPlan(d = {}) {
+  const ratio = parseRatio(d.ratio);
+  const garments = ratio.total;
+  const lengthM = d.markerLengthUnit === 'Yard' ? num(d.markerLength) * 0.9144 : num(d.markerLength);
+  const perMarker = d.unit === 'KG' ? metersToKg(lengthM, d.gsm, d.markerWidth) : d.unit === 'Yard' ? lengthM / 0.9144 : lengthM;
+  const consumptionPerPc = garments ? round(perMarker / garments, 4) : 0;
+  const plannedCutQty = garments * num(d.plannedPlies);
+  const fabricRequired = round(perMarker * num(d.plannedPlies), 3);
+  const bom = num(d.bomConsumption);
+  return {
+    garmentsPerMarker: garments,
+    consumptionPerPc,
+    plannedCutQty,
+    fabricRequired,
+    consumptionVariancePct: bom && consumptionPerPc ? round(((consumptionPerPc - bom) / bom) * 100, 2) : 0,
+  };
+}
+
 /**
  * Fabric balance & closure readiness.
  * Returns booking/receipt/stock balances plus a closure verdict.
@@ -325,18 +383,23 @@ export function profitAnalysis(i = {}) {
 /** Default T&A template. `pos` = relative position between order date (0) and shipment date (1). */
 export const TNA_TEMPLATE = [
   ['Order Confirmation', 0, 'Head Office Merchandising'],
+  ['Tech Spec Approval', 0.03, 'Head Office Merchandising'],
+  ['BOM Approval', 0.05, 'Factory Merchandising'],
   ['PP Meeting', 0.06, 'Factory Merchandising'],
   ['Fabric Booking', 0.08, 'Fabric Department'],
   ['Trim Booking', 0.1, 'Factory Merchandising'],
   ['Lab Dip', 0.12, 'Fabric Department'],
   ['Strike-off', 0.15, 'Factory Merchandising'],
   ['Proto Sample', 0.18, 'Factory Merchandising'],
+  ['Pattern Approval', 0.22, 'CAD / Pattern'],
   ['Fit Sample', 0.25, 'Factory Merchandising'],
   ['Fabric In-house', 0.4, 'Fabric Department'],
   ['Trim In-house', 0.42, 'Factory Merchandising'],
+  ['Grading', 0.44, 'CAD / Pattern'],
   ['Size Set', 0.45, 'Factory Merchandising'],
   ['PP Sample', 0.5, 'Factory Merchandising'],
   ['Approval', 0.55, 'Head Office Merchandising'],
+  ['Marker Ready', 0.58, 'CAD / Pattern'],
   ['Cutting Start', 0.6, 'Cutting'],
   ['Sewing Start', 0.65, 'Sewing'],
   ['Finishing Start', 0.8, 'Finishing'],

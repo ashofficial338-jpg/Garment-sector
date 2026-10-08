@@ -61,7 +61,7 @@ export async function scanAlerts() {
     }
     const costings = await models.costing.find({ ...live, status: { $in: ['Submitted', 'Under Review'] }, updatedAt: { $lt: old } }).lean();
     for (const x of costings) {
-      await notify({ type: 'APPROVAL_PENDING', severity: 'info', title: `Costing approval pending: ${x.refNo}`, message: `${x.styleNo} – ${x.status}.`, departments: ['Costing Factory', 'Admin'], module: 'costing', recordId: x._id, dedupeKey: `appr-${x._id}-${iso(today)}` });
+      await notify({ type: 'APPROVAL_PENDING', severity: 'info', title: `Costing approval pending: ${x.refNo}`, message: `${x.styleNo} – ${x.status}.`, departments: ['Costing Factory', 'Admin'], module: 'costing', recordId: x._id, businessUnit: x.businessUnit, dedupeKey: `appr-${x._id}-${iso(today)}` });
     }
   }
 

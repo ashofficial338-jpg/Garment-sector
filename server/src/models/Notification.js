@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { unitScoped } from '../services/unitContext.js';
 
 const notificationSchema = new mongoose.Schema({
   type: { type: String, index: true }, // TNA_DELAY, FABRIC_SHORTAGE, TRIM_SHORTAGE, APPROVAL_PENDING, PRODUCTION_DELAY, QUALITY_FAIL, SHIPMENT_DELAY, PAYMENT_DUE, JOB_READY_TO_CLOSE, INFO
@@ -16,5 +17,6 @@ const notificationSchema = new mongoose.Schema({
   dedupeKey: { type: String, index: { unique: true, sparse: true } },
 }, { timestamps: true });
 notificationSchema.index({ createdAt: -1 });
+notificationSchema.plugin(unitScoped);
 
 export const Notification = mongoose.model('Notification', notificationSchema);

@@ -16,7 +16,16 @@ export const ACTIONS = ['view', 'create', 'edit', 'delete', 'approve', 'export',
 export const DEPARTMENTS = [
   'Admin', 'Fabric Department', 'Accounts & Finance', 'Costing Factory', 'Factory Merchandising',
   'Data Entry', 'Head Office Merchandising', 'HR', 'Production', 'Cutting', 'Sewing',
-  'Finishing', 'Packing', 'Quality', 'Shipment / Documentation',
+  'Finishing', 'Packing', 'Quality', 'Shipment / Documentation', 'CAD / Pattern',
+];
+
+/**
+ * Business units – one ERP, separate operational data and job number series.
+ * Admin can rename units and move a series forward in Settings → Units & job numbering.
+ */
+export const DEFAULT_UNITS = [
+  { code: 'U1', name: 'Unit-1', prefix: 'U1', start: 1000 },
+  { code: 'U2', name: 'Unit-2', prefix: 'U2', start: 3000 },
 ];
 
 /** Units of measure */
@@ -32,8 +41,14 @@ export const LIFECYCLE_STAGES = [
   { key: 'costing', label: 'Costing', module: 'costing', department: 'Costing Factory' },
   { key: 'quotation', label: 'Quotation', module: 'quotation', department: 'Head Office Merchandising' },
   { key: 'order', label: 'Order Confirmation', module: 'orders', department: 'Head Office Merchandising' },
+  { key: 'spec', label: 'Specification', module: 'techSpec', department: 'Head Office Merchandising' },
+  { key: 'bom', label: 'Bill of Materials', module: 'bom', department: 'Factory Merchandising' },
   { key: 'tna', label: 'T&A', module: 'tna', department: 'Factory Merchandising' },
   { key: 'ppMeeting', label: 'PP Meeting', module: 'ppMeeting', department: 'Factory Merchandising' },
+  { key: 'cad', label: 'CAD', module: 'pattern', department: 'CAD / Pattern' },
+  { key: 'pattern', label: 'Pattern', module: 'pattern', department: 'CAD / Pattern' },
+  { key: 'grading', label: 'Grading', module: 'pattern', department: 'CAD / Pattern' },
+  { key: 'marker', label: 'Marker', module: 'marker', department: 'CAD / Pattern' },
   { key: 'fabric', label: 'Fabric Booking', module: 'fabricBooking', department: 'Fabric Department' },
   { key: 'trims', label: 'Trim Booking', module: 'trimBooking', department: 'Factory Merchandising' },
   { key: 'sampling', label: 'Sampling', module: 'sample', department: 'Factory Merchandising' },

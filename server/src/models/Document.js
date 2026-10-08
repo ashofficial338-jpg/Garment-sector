@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { unitScoped } from '../services/unitContext.js';
 
 const versionSchema = new mongoose.Schema({
   version: Number,
@@ -29,4 +30,5 @@ const documentSchema = new mongoose.Schema({
   createdByName: String,
 }, { timestamps: true });
 
+documentSchema.plugin(unitScoped);
 export const DocumentFile = mongoose.model('DocumentFile', documentSchema);

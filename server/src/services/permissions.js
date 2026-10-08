@@ -1,4 +1,4 @@
-import { ACTIONS, SYSTEM_PERMISSION_MODULES } from '../../../shared/constants.js';
+import { ACTIONS, SYSTEM_PERMISSION_MODULES, DEFAULT_UNITS } from '../../../shared/constants.js';
 import { MODULE_LIST } from '../../../shared/modules/index.js';
 
 /** All permission-bearing modules (business modules + system modules). */
@@ -24,6 +24,13 @@ export function effectivePermissions(user) {
     if (set.size) map[key] = [...set];
   });
   return { isAdmin: false, map };
+}
+
+/** Unit codes a user may work in: Admin (super admin) → every unit; others → the units assigned to them. */
+export function allowedUnits(user) {
+  const all = DEFAULT_UNITS.map((u) => u.code);
+  if (user?.role?.isAdmin) return all;
+  return (user?.units || []).filter((u) => all.includes(u));
 }
 
 export function can(perms, moduleKey, action) {

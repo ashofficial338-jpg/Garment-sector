@@ -2,7 +2,7 @@
 export const NAV = [
   { group: 'Overview', items: [
     { to: '/', label: 'Dashboard', icon: 'LayoutDashboard', perm: ['dashboard'] },
-    { to: '/control-tower', label: 'Job Control Tower', icon: 'RadioTower', perm: ['jobs'] },
+    { to: '/control-tower', label: 'Job 360 / Control Tower', icon: 'RadioTower', perm: ['jobs'] },
     { to: '/my-dashboard', label: 'Department Dashboard', icon: 'Gauge', perm: ['dashboard'] },
   ] },
   { group: 'Merchandising', items: [
@@ -10,6 +10,12 @@ export const NAV = [
     { to: '/m/costing', label: 'Costing', icon: 'Calculator', perm: ['costing'] },
     { to: '/m/quotation', label: 'Quotations', icon: 'FileSignature', perm: ['quotation'] },
     { to: '/m/orders', label: 'Orders / Jobs', icon: 'ClipboardCheck', perm: ['orders'] },
+  ] },
+  { group: 'Pre-Production', items: [
+    { to: '/m/techSpec', label: 'Specifications', icon: 'FileCog', perm: ['techSpec'] },
+    { to: '/m/bom', label: 'Bill of Materials', icon: 'ListTree', perm: ['bom'] },
+    { to: '/m/pattern', label: 'CAD, Pattern & Grading', icon: 'DraftingCompass', perm: ['pattern'] },
+    { to: '/m/marker', label: 'Markers', icon: 'Ruler', perm: ['marker'] },
   ] },
   { group: 'Planning', items: [
     { to: '/m/tna', label: 'Time & Action', icon: 'CalendarClock', perm: ['tna'] },

@@ -6,7 +6,7 @@ export const primaryDateField = (def) => def.fields.find((f) => f.type === 'date
 
 /**
  * Build a Mongo filter from query params (shared by list, export and reports):
- *   q, job (Job No or id; includes sub jobs), status, from, to, dateField, createdBy, buyer, deleted, f_<field>
+ *   q, job (Job No or id; includes sub jobs), status, from, to, dateField, createdBy, buyer, style, deleted, f_<field>
  */
 export async function buildFilter(def, q = {}, { allowDeleted = false } = {}) {
   const filter = { isDeleted: allowDeleted && q.deleted === 'true' ? true : false };
@@ -38,6 +38,7 @@ export async function buildFilter(def, q = {}, { allowDeleted = false } = {}) {
     const rx = new RegExp(escapeRegex(q.buyer), 'i');
     if (def.isJob || def.jobLinked || def.fields.some((f) => f.name === 'buyer')) and.push({ buyerName: rx });
   }
+  if (q.style && (def.jobLinked || def.isJob || def.fields.some((f) => f.name === 'styleNo'))) and.push({ styleNo: new RegExp(escapeRegex(q.style), 'i') });
   if (q.department && def.department && q.department !== def.department) filter._id = null; // module belongs to another department
 
   const dateField = q.dateField && /^\w+$/.test(q.dateField) ? q.dateField : primaryDateField(def);
@@ -66,5 +67,5 @@ export async function buildFilter(def, q = {}, { allowDeleted = false } = {}) {
 /** Populate spec for reference fields (except Job which is denormalised). */
 export function populateSpec(def) {
   return def.fields.filter((f) => f.type === 'ref')
-    .map((f) => ({ path: f.name, select: 'refNo name jobNo styleNo invoiceNo totalAmount outstanding status sellingPrice orderQty' }));
+    .map((f) => ({ path: f.name, select: 'refNo name jobNo styleNo invoiceNo totalAmount outstanding status sellingPrice orderQty patternNo markerNo revision' }));
 }

@@ -3,7 +3,7 @@ import { useAuth } from '../auth/AuthContext.jsx';
 import { errMsg } from '../api.js';
 import { Field, Icon, Spinner } from '../components/ui.jsx';
 
-const FLOW = ['Enquiry', 'Costing', 'Quotation', 'Order', 'T&A', 'PP Meeting', 'Fabric', 'Trims', 'Sampling', 'Planning', 'Cutting', 'Sewing', 'Finishing', 'Packing', 'Inspection', 'Shipment', 'Documents', 'Accounts', 'Payment', 'Profit', 'Job Close'];
+const FLOW = ['Enquiry', 'Costing', 'Quotation', 'Order', 'Spec', 'BOM', 'CAD', 'Pattern', 'Grading', 'Marker', 'T&A', 'PP Meeting', 'Fabric', 'Trims', 'Sampling', 'Planning', 'Cutting', 'Sewing', 'Finishing', 'Packing', 'Inspection', 'Shipment', 'Documents', 'Accounts', 'Payment', 'Profit', 'Job Close'];
 
 export default function Login() {
   const { login } = useAuth();
@@ -39,7 +39,7 @@ export default function Login() {
       <div className="login-form">
         <form className="login-card" onSubmit={submit}>
           <h2>Sign in</h2>
-          <p className="muted" style={{ margin: '6px 0 22px' }}>Use the account issued by your administrator.</p>
+          <p className="muted" style={{ margin: '6px 0 22px' }}>Use the account issued by your administrator. You choose your unit next.</p>
           <div className="col">
             <Field label="Email / Username"><input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required autoFocus /></Field>
             <Field label="Password">

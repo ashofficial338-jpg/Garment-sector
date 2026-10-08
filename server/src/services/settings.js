@@ -1,6 +1,5 @@
 import { Setting } from '../models/Setting.js';
-import { LIFECYCLE_STAGES, REQUIRED_SHIPPING_DOCS } from '../../../shared/constants.js';
-import { env } from '../config/env.js';
+import { LIFECYCLE_STAGES, REQUIRED_SHIPPING_DOCS, DEFAULT_UNITS } from '../../../shared/constants.js';
 
 /** Default workflow configuration – editable by Admin in Settings → Workflow. */
 export const DEFAULT_WORKFLOW = LIFECYCLE_STAGES.map((s) => ({
@@ -9,14 +8,14 @@ export const DEFAULT_WORKFLOW = LIFECYCLE_STAGES.map((s) => ({
   department: s.department,
   responsibleUser: '',
   enabled: true,
-  approvalRequired: ['costing', 'quotation', 'sampling', 'approval', 'planning', 'inspection'].includes(s.key),
+  approvalRequired: ['costing', 'quotation', 'spec', 'bom', 'pattern', 'marker', 'sampling', 'approval', 'planning', 'inspection'].includes(s.key),
   requiredDocuments: s.key === 'documentation' ? [...REQUIRED_SHIPPING_DOCS] : [],
   requiredForClosure: ['cutting', 'sewing', 'finishing', 'packing', 'inspection', 'shipment', 'documentation', 'accounts', 'payment'].includes(s.key),
   completionCondition: '',
 }));
 
 export const DEFAULTS = {
-  jobNumber: { prefix: env.jobPrefix, digits: 5, includeYear: true, separator: '-' },
+  units: DEFAULT_UNITS,
   subJob: { prefix: 'F', digits: 2 },
   tolerance: { shortShipPct: 3, overCutPct: 5, overShipPct: 0 },
   workflow: DEFAULT_WORKFLOW,
@@ -30,10 +29,18 @@ export async function getSetting(key) {
   if (cache.has(key)) return cache.get(key);
   const doc = await Setting.findOne({ key }).lean();
   let value = doc?.value ?? DEFAULTS[key];
-  if (key === 'workflow' && Array.isArray(value)) {
-    // merge new default stages that might not be in a stored config
+  if (key === 'units' && Array.isArray(value)) {
+    // both units always exist; stored config only overrides names / prefixes / start numbers
+    value = DEFAULT_UNITS.map((d) => ({ ...d, ...(value.find((v) => v.code === d.code) || {}), code: d.code }));
+  } else if (key === 'workflow' && Array.isArray(value)) {
+    // merge new default stages that might not be in a stored config, at their default position
     const known = new Set(value.map((s) => s.key));
-    value = [...value, ...DEFAULT_WORKFLOW.filter((s) => !known.has(s.key))];
+    value = [...value];
+    DEFAULT_WORKFLOW.forEach((s, i) => {
+      if (known.has(s.key)) return;
+      const prev = DEFAULT_WORKFLOW.slice(0, i).reverse().find((p) => value.some((v) => v.key === p.key));
+      value.splice(prev ? value.findIndex((v) => v.key === prev.key) + 1 : 0, 0, s);
+    });
   } else if (value && typeof value === 'object' && !Array.isArray(value) && DEFAULTS[key]) {
     value = { ...DEFAULTS[key], ...value };
   }

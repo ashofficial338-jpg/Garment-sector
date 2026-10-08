@@ -9,9 +9,11 @@ import * as planning from './planning.js';
 import * as production from './production.js';
 import * as finance from './finance.js';
 import * as stock from './stock.js';
+import * as preproduction from './preproduction.js';
 
 const ordered = [
   commercial.enquiry, commercial.costing, commercial.quotation, commercial.orders,
+  preproduction.techSpec, preproduction.bom, preproduction.pattern, preproduction.marker,
   planning.tna, planning.ppMeeting, planning.fabricBooking, planning.trimBooking,
   stock.yarnReceipt, stock.knitting, stock.fabricProcess, planning.sample, planning.productionPlan,
   production.cutting, production.sewing, production.finishing, production.packing, production.inspection,
@@ -60,4 +62,4 @@ export function allowedTransitions(def, current) {
   return def.transitions?.[current] || [];
 }
 
-export { masters, commercial, planning, production, finance, stock };
+export { masters, commercial, planning, production, finance, stock, preproduction };

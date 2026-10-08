@@ -5,6 +5,7 @@
  */
 import mongoose from 'mongoose';
 import { MODULE_LIST } from '../../../shared/modules/index.js';
+import { unitScoped } from '../services/unitContext.js';
 
 const { Schema } = mongoose;
 const ObjectId = Schema.Types.ObjectId;
@@ -49,7 +50,8 @@ const EXTENSIONS = {
     outstandingApprovedBy: { type: ObjectId, ref: 'User' },
   },
   quotation: { quoteGroup: { type: String, index: true }, supersededBy: { type: ObjectId, ref: 'Quotation' } },
-  fabricBooking: { closedAt: Date, closedBy: { type: ObjectId, ref: 'User' }, readyToClose: Boolean },
+  fabricBooking: { closedAt: Date, closedBy: { type: ObjectId, ref: 'User' }, readyToClose: Boolean, fromBom: Boolean },
+  trimBooking: { fromBom: Boolean },
 };
 
 export function buildSchema(def) {
@@ -88,6 +90,8 @@ export function buildSchema(def) {
   Object.assign(shape, EXTENSIONS[def.key] || {});
 
   const schema = new Schema(shape, { timestamps: true, strict: true, minimize: false });
+  // operational data belongs to one business unit; buyers, suppliers and master data are shared
+  if (!def.sharedAcrossUnits) schema.plugin(unitScoped);
 
   // Indexes for search / filter
   schema.index({ createdAt: -1 });

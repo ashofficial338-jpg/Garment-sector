@@ -7,6 +7,10 @@ import { DEFAULT_ROLES } from '../data/defaultRoles.js';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { UNITS, CURRENCIES, DEPARTMENTS } from '../../../shared/constants.js';
+import { MODULE_LIST } from '../../../shared/modules/index.js';
+import { Notification } from '../models/Notification.js';
+import { AuditLog } from '../models/AuditLog.js';
+import { DocumentFile } from '../models/Document.js';
 import { PAYMENT_TERMS, INCOTERMS, TRIM_ITEMS } from '../../../shared/modules/commercial.js';
 
 export async function ensureRoles() {
@@ -67,8 +71,22 @@ export async function ensureMasters() {
   logger.info(`Seeded ${rows.length} master data records`);
 }
 
+/**
+ * Two-unit upgrade: data created before units existed belongs to Unit-1 (its job numbers are kept),
+ * and existing non-admin users keep working in Unit-1 until Admin assigns more units.
+ */
+export async function ensureUnits() {
+  const missing = { businessUnit: { $exists: false } };
+  const targets = [...MODULE_LIST.filter((d) => !d.sharedAcrossUnits).map((d) => models[d.key]), Notification, AuditLog, DocumentFile];
+  let moved = 0;
+  for (const M of targets) moved += (await M.updateMany(missing, { $set: { businessUnit: 'U1' } })).modifiedCount;
+  const users = await User.updateMany({ units: { $exists: false } }, { $set: { units: ['U1'] } });
+  if (moved || users.modifiedCount) logger.info(`Units: ${moved} existing records and ${users.modifiedCount} users assigned to Unit-1`);
+}
+
 export async function bootstrap() {
   await ensureRoles();
+  await ensureUnits();
   await ensureAdmin();
   await ensureMasters();
 }

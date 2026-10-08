@@ -6,7 +6,10 @@ import { User } from '../models/User.js';
 import { Role } from '../models/Role.js';
 import { Session } from '../models/Session.js';
 import { AuditLog } from '../models/AuditLog.js';
-import { permit, adminOnly, clearUserCache } from '../middleware/auth.js';
+import { permit, adminOnly, clearUserCache, scopeFromQuery } from '../middleware/auth.js';
+import { runWithUnit, ALL_UNITS } from '../services/unitContext.js';
+import { peekJobNo, setNextJobNo } from '../services/numbering.js';
+import { DEFAULT_UNITS } from '../../../shared/constants.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 import { escapeRegex, pageParams } from '../utils/query.js';
@@ -32,9 +35,24 @@ const cleanPerms = (p = {}) => {
   return out;
 };
 
+/**
+ * Units a user may be given: Admin can assign any unit; other user managers only their own units.
+ * Admin-role users always reach every unit, so their list is informational.
+ */
+function cleanUnits(req, units) {
+  const valid = DEFAULT_UNITS.map((u) => u.code);
+  const list = [...new Set((Array.isArray(units) ? units : []).filter((u) => valid.includes(u)))];
+  const foreign = list.filter((u) => !req.units.includes(u));
+  if (foreign.length) throw ApiError.forbidden(`You cannot assign unit ${foreign.join(', ')}`);
+  return list;
+}
+
 /* ------------------------------ Users ------------------------------ */
 r.get('/users', permit('users', 'view'), asyncHandler(async (req, res) => {
   const filter = { isDeleted: req.perms.isAdmin && req.query.deleted === 'true' };
+  // Admin sees every user (optionally one unit); other user managers only users of their current unit
+  if (!req.perms.isAdmin) filter.units = req.unit;
+  else if (req.query.unit && req.query.unit !== 'ALL') filter.units = req.query.unit;
   if (req.query.q) {
     const rx = new RegExp(escapeRegex(req.query.q), 'i');
     filter.$or = [{ name: rx }, { email: rx }, { department: rx }];
@@ -47,25 +65,28 @@ r.get('/users', permit('users', 'view'), asyncHandler(async (req, res) => {
 r.post('/users', permit('users', 'create'), asyncHandler(async (req, res) => {
   const { name, email, password, role, department, phone, permissions, revoked } = req.body;
   if (!name || !email || !role) throw ApiError.badRequest('Name, email and role are required');
+  const units = cleanUnits(req, req.body.units ?? [req.unit]);
   if (!PASSWORD_RULE.test(String(password || ''))) throw ApiError.badRequest(PASSWORD_HINT);
   const roleDoc = await Role.findById(role);
   if (!roleDoc) throw ApiError.badRequest('Role not found');
   if (roleDoc.isAdmin && !req.perms.isAdmin) throw ApiError.forbidden('Only Admin can create admin users');
+  if (!roleDoc.isAdmin && !units.length) throw ApiError.badRequest('Assign at least one unit');
   const user = await User.create({
-    name, email, phone, role, department: department || roleDoc.department || roleDoc.name,
+    name, email, phone, role, units, department: department || roleDoc.department || roleDoc.name,
     passwordHash: await bcrypt.hash(String(password), 12),
     permissions: req.perms.isAdmin ? cleanPerms(permissions) : {},
     revoked: req.perms.isAdmin ? cleanPerms(revoked) : {},
     mustChangePassword: true, createdBy: req.user._id,
   });
-  await audit(req, { action: 'CREATE', module: 'users', record: { _id: user._id, refNo: user.email }, message: `${req.user.name} created user ${user.email} (${roleDoc.name})` });
+  await audit(req, { action: 'CREATE', module: 'users', record: { _id: user._id, refNo: user.email }, message: `${req.user.name} created user ${user.email} (${roleDoc.name}, units ${units.join(', ') || 'all'})` });
   res.status(201).json(user);
 }));
 
 r.put('/users/:id', permit('users', 'edit'), asyncHandler(async (req, res) => {
   const user = await User.findById(req.params.id).populate('role');
   if (!user || user.isDeleted) throw ApiError.notFound();
-  const before = { name: user.name, email: user.email, role: String(user.role?._id), department: user.department, isActive: user.isActive, permissions: Object.fromEntries(user.permissions), revoked: Object.fromEntries(user.revoked) };
+  if (!req.perms.isAdmin && !(user.units || []).includes(req.unit)) throw ApiError.forbidden('User belongs to another unit');
+  const before = { name: user.name, email: user.email, role: String(user.role?._id), department: user.department, units: (user.units || []).join(', '), isActive: user.isActive, permissions: Object.fromEntries(user.permissions), revoked: Object.fromEntries(user.revoked) };
   const { name, email, role, department, phone, isActive, permissions, revoked } = req.body;
   if (role && String(role) !== String(user.role?._id)) {
     const roleDoc = await Role.findById(role);
@@ -79,10 +100,16 @@ r.put('/users/:id', permit('users', 'edit'), asyncHandler(async (req, res) => {
   if (department !== undefined) user.department = department;
   if (phone !== undefined) user.phone = phone;
   if (isActive !== undefined) user.isActive = !!isActive;
+  if (req.body.units !== undefined) {
+    // a non-admin manager can only add / remove their own units; other assignments are kept
+    const keep = (user.units || []).filter((u) => !req.units.includes(u));
+    user.units = [...new Set([...keep, ...cleanUnits(req, req.body.units)])];
+    if (!user.units.length && !user.role?.isAdmin) throw ApiError.badRequest('Assign at least one unit');
+  }
   if (req.perms.isAdmin && permissions !== undefined) user.permissions = cleanPerms(permissions);
   if (req.perms.isAdmin && revoked !== undefined) user.revoked = cleanPerms(revoked);
   await user.save();
-  const after = { name: user.name, email: user.email, role: String(user.role?._id || user.role), department: user.department, isActive: user.isActive, permissions: Object.fromEntries(user.permissions), revoked: Object.fromEntries(user.revoked) };
+  const after = { name: user.name, email: user.email, role: String(user.role?._id || user.role), department: user.department, units: (user.units || []).join(', '), isActive: user.isActive, permissions: Object.fromEntries(user.permissions), revoked: Object.fromEntries(user.revoked) };
   const changes = diffObjects(before, after);
   if (!user.isActive) await Session.updateMany({ user: user._id, revokedAt: null }, { revokedAt: new Date() });
   clearUserCache(user._id);
@@ -172,14 +199,49 @@ r.get('/settings', permit('settings', 'view'), asyncHandler(async (_req, res) =>
 r.put('/settings/:key', adminOnly, asyncHandler(async (req, res) => {
   const { key } = req.params;
   if (!(key in DEFAULTS)) throw ApiError.badRequest('Unknown setting');
+  if (key === 'units') throw ApiError.badRequest('Use Units & job numbering to change units');
   const before = (await getAllSettings())[key];
   const value = await setSetting(key, req.body.value, req.user._id);
   await audit(req, { action: 'SETTINGS', module: 'settings', changes: [{ field: key, old: before, new: value }], message: `${req.user.name} updated ${key} settings` });
   res.json(value);
 }));
 
+/* ------------------------------ Units & job number series (Admin) ------------------------------ */
+r.get('/units', permit('settings', 'view'), asyncHandler(async (_req, res) => {
+  const units = await getAllSettings().then((s) => s.units);
+  const rows = await runWithUnit(ALL_UNITS, () => Promise.all(units.map(async (u) => ({
+    ...u,
+    nextJobNo: await peekJobNo(u.code),
+    jobs: await models.orders.countDocuments({ businessUnit: u.code, isDeleted: false, parentJob: null }),
+    openJobs: await models.orders.countDocuments({ businessUnit: u.code, isDeleted: false, parentJob: null, status: { $nin: ['Closed', 'Cancelled'] } }),
+    users: await User.countDocuments({ isDeleted: false, units: u.code }),
+  }))));
+  res.json({ rows });
+}));
+
+r.put('/units/:code', adminOnly, asyncHandler(async (req, res) => {
+  const units = (await getAllSettings()).units;
+  const unit = units.find((u) => u.code === req.params.code);
+  if (!unit) throw ApiError.notFound('Unknown unit');
+  const name = String(req.body.name ?? unit.name).trim();
+  if (!name) throw ApiError.badRequest('Unit name is required');
+  if (units.some((u) => u.code !== unit.code && u.name.toLowerCase() === name.toLowerCase())) throw ApiError.conflict('Another unit has this name');
+  const changes = [];
+  if (name !== unit.name) changes.push({ field: 'name', old: unit.name, new: name });
+  if (req.body.nextJobNo !== undefined && req.body.nextJobNo !== '') {
+    const before = await peekJobNo(unit.code);
+    const next = Number(req.body.nextJobNo);
+    try { await setNextJobNo(unit.code, next); } catch (e) { throw ApiError.badRequest(e.message); }
+    if (next !== before) changes.push({ field: 'nextJobNo', old: `${unit.prefix}-${before}`, new: `${unit.prefix}-${next}` });
+  }
+  await setSetting('units', units.map((u) => (u.code === unit.code ? { ...u, name } : u)), req.user._id);
+  clearUserCache();
+  if (changes.length) await audit(req, { action: 'SETTINGS', module: 'settings', changes, message: `${req.user.name} updated ${unit.code} (${changes.map((c) => `${c.field} ${c.old} → ${c.new}`).join('; ')})` });
+  res.json({ ok: true });
+}));
+
 /* ------------------------------ Audit trail ------------------------------ */
-r.get('/audit', permit('audit', 'view'), asyncHandler(async (req, res) => {
+r.get('/audit', permit('audit', 'view'), scopeFromQuery, asyncHandler(async (req, res) => {
   const f = {};
   if (req.query.module) f.module = req.query.module;
   if (req.query.action) f.action = req.query.action;

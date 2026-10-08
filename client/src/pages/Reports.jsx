@@ -8,6 +8,7 @@ import { PageHead, Icon, Card, Empty, Spinner, Field } from '../components/ui.js
 import { DEPARTMENTS } from '@shared/constants.js';
 import { MODULES } from '@shared/modules/index.js';
 import { reportPdf } from '../utils/pdf.js';
+import { UnitScope, useUnitName } from '../components/UnitScope.jsx';
 import { fmtDate, fmtNum } from '../utils/format.js';
 
 const show = (v) => {
@@ -19,12 +20,13 @@ const show = (v) => {
 };
 
 export default function Reports() {
-  const { can } = useAuth();
+  const { can, user } = useAuth();
+  const unitName = useUnitName();
   const { toast } = useFeedback();
   const [sp] = useSearchParams();
   const [list, setList] = useState([]);
   const [key, setKey] = useState(sp.get('r') || '');
-  const [f, setF] = useState({ from: '', to: '', job: '', buyer: '', department: '', status: '', createdBy: '' });
+  const [f, setF] = useState({ unit: '', from: '', to: '', job: '', buyer: '', style: '', department: '', status: '', createdBy: '' });
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
   const [q, setQ] = useState('');
@@ -39,13 +41,14 @@ export default function Reports() {
   };
   useEffect(() => { setData(null); if (key) run(); }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const filterText = Object.entries(params).map(([k, v]) => `${k}: ${v}`).join(' · ');
+  const scopeText = f.unit === 'ALL' ? 'Both units (consolidated)' : unitName(f.unit || user.unit.code);
+  const filterText = [`Unit: ${scopeText}`, ...Object.entries(params).filter(([k]) => k !== 'unit').map(([k, v]) => `${k}: ${v}`)].join(' · ');
   const groups = list.reduce((m, r) => ({ ...m, [r.department]: [...(m[r.department] || []), r] }), {});
   const statuses = rep ? MODULES[rep.module]?.statuses || [] : [];
 
   return (
     <div>
-      <PageHead title="Report Center" icon="FileBarChart" subtitle="Every module report with date, job, buyer, department, status and user filters – export to PDF, Excel, CSV or print." />
+      <PageHead title="Report Center" icon="FileBarChart" subtitle="Every module report by unit (or both units consolidated) with date, job, buyer, style, department, status and user filters – export to PDF, Excel, CSV or print." />
       <div className="grid mt side-grid">
         <Card title="Reports" icon="Files" pad={false} className="hide-sm">
           <div style={{ padding: 10 }}><input placeholder="Find report…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
@@ -68,10 +71,12 @@ export default function Reports() {
           <Card title={rep?.title || 'Select a report'} icon="SlidersHorizontal">
             <div className="form-grid">
               <Field label="Report" ><select value={key} onChange={(e) => setKey(e.target.value)}>{list.map((r) => <option key={r.key} value={r.key}>{r.title}</option>)}</select></Field>
+              {user.units.length > 1 ? <Field label="Unit"><UnitScope value={f.unit} onChange={(v) => setF({ ...f, unit: v })} /></Field> : <Field label="Unit"><input readOnly value={user.unit.name} /></Field>}
               <Field label="From"><input type="date" value={f.from} onChange={(e) => setF({ ...f, from: e.target.value })} /></Field>
               <Field label="To"><input type="date" value={f.to} onChange={(e) => setF({ ...f, to: e.target.value })} /></Field>
-              <Field label="Job No"><input value={f.job} placeholder="GAR-2026-00001" onChange={(e) => setF({ ...f, job: e.target.value })} /></Field>
+              <Field label="Job No"><input value={f.job} placeholder={`${user.unit.prefix}-…`} onChange={(e) => setF({ ...f, job: e.target.value })} /></Field>
               <Field label="Buyer"><input value={f.buyer} onChange={(e) => setF({ ...f, buyer: e.target.value })} /></Field>
+              <Field label="Style"><input value={f.style} onChange={(e) => setF({ ...f, style: e.target.value })} /></Field>
               <Field label="Status"><select value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })}><option value="">All</option>{statuses.map((s) => <option key={s}>{s}</option>)}</select></Field>
               <Field label="Department"><select value={f.department} onChange={(e) => setF({ ...f, department: e.target.value })}><option value="">All</option>{DEPARTMENTS.map((d) => <option key={d}>{d}</option>)}</select></Field>
               <Field label="Created by (user)"><UserPick value={f.createdBy} onChange={(v) => setF({ ...f, createdBy: v })} /></Field>
@@ -87,7 +92,7 @@ export default function Reports() {
               {data && <button className="btn" onClick={() => window.print()}><Icon name="Printer" size={15} /> Print</button>}
             </div>
           </Card>
-          <Card title={data ? `${fmtNum(data.rows.length)} rows` : 'Results'} icon="Table" pad={false}>
+          <Card title={data ? `${fmtNum(data.rows.length)} rows · ${scopeText}` : 'Results'} icon="Table" pad={false}>
             {!data ? <Empty icon="FileBarChart" title={busy ? 'Running…' : 'Run a report to see results'} /> : (
               <div className="table-wrap" style={{ maxHeight: '65vh' }}>
                 <table className="tbl tbl-mini">

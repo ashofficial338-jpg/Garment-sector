@@ -25,6 +25,8 @@ r.get('/', asyncHandler(async (req, res) => {
   const extra = [
     ['enquiry', 'Enquiry', [{ styleNo: rx }, { buyerName: rx }, { product: rx }], (x) => `${x.refNo} · ${x.styleNo}`, (x) => x.buyerName],
     ['quotation', 'Quotation', [{ styleNo: rx }, { buyerName: rx }], (x) => `${x.refNo} v${x.version || 1} · ${x.styleNo}`, (x) => `${x.buyerName || ''} · ${x.price} ${x.currency}`],
+    ['pattern', 'Pattern', [{ patternNo: rx }, { cadFileName: rx }, { patternMaker: rx }], (x) => `${x.refNo} · ${x.patternNo}`, (x) => `${x.jobNo} · ${x.patternType || ''} · rev ${x.revision || 1}`],
+    ['marker', 'Marker', [{ markerNo: rx }, { ratio: rx }], (x) => `${x.refNo} · ${x.markerNo}`, (x) => `${x.jobNo} · ${x.consumptionPerPc} ${x.unit}/pc`],
     ['fabricBooking', 'Fabric', [{ fabricType: rx }, { supplierName: rx }, { supplierPoNo: rx }, { composition: rx }], (x) => `${x.refNo} · ${x.fabricType}`, (x) => `${x.jobNo} · ${x.supplierName || ''} · ${x.closureVerdict || ''}`],
     ['trimBooking', 'Trim', [{ supplierName: rx }, { description: rx }, { item: rx }], (x) => `${x.refNo} · ${x.item}`, (x) => `${x.jobNo} · ${x.supplierName || ''}`],
     ['shipment', 'Shipment', [{ blAwbNo: rx }, { invoiceNo: rx }, { containerNo: rx }, { forwarder: rx }, { vesselFlight: rx }], (x) => `${x.refNo} · ${x.invoiceNo || ''}`, (x) => `${x.jobNo} · ${x.mode} · BL ${x.blAwbNo || '-'}`],

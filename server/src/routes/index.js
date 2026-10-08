@@ -1,6 +1,6 @@
 import express from 'express';
 import mongoose from 'mongoose';
-import { authenticate, requirePasswordFresh } from '../middleware/auth.js';
+import { authenticate, requirePasswordFresh, requireUnit } from '../middleware/auth.js';
 import { MODULE_LIST } from '../../../shared/modules/index.js';
 import { crudRouter } from '../modules/crudRouter.js';
 import authRoutes from './auth.js';
@@ -26,8 +26,9 @@ api.get('/health', (_req, res) => {
 });
 api.use('/auth', authRoutes);
 
-// Everything below requires a valid session and a non-temporary password
-api.use(authenticate, requirePasswordFresh);
+// Everything below requires a valid session, a non-temporary password and a selected unit,
+// and runs scoped to that unit's data
+api.use(authenticate, requirePasswordFresh, requireUnit);
 api.get('/meta/permission-modules', (_req, res) => res.json(PERMISSION_MODULES));
 api.get('/meta/company', async (_req, res, next) => { try { res.json(await getSetting('company')); } catch (e) { next(e); } });
 api.use('/admin', adminRoutes);

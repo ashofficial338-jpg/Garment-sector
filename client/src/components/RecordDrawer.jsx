@@ -247,7 +247,7 @@ export default function RecordDrawer({ def, id, initialJob, onClose, onSaved }) 
             </div>
           )}
           <div className="card card-pad">
-            <FormRenderer def={def} values={computed} onChange={set} errors={errors} disabled={!editable} />
+            <FormRenderer def={def} values={computed} onChange={set} errors={errors} disabled={!editable} jobNo={job?.jobNo || rec?.jobNo} />
           </div>
         </>
       )}

@@ -10,7 +10,8 @@ import { authenticate, clearUserCache } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 import { audit } from '../services/audit.js';
-import { effectivePermissions } from '../services/permissions.js';
+import { effectivePermissions, allowedUnits } from '../services/permissions.js';
+import { getSetting } from '../services/settings.js';
 
 const r = express.Router();
 const COOKIE = 'gerp_rt';
@@ -22,26 +23,31 @@ const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, keyGenerat
 export const PASSWORD_RULE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 export const PASSWORD_HINT = 'Password must be at least 8 characters with upper & lower case letters, a number and a symbol';
 
-function signAccess(user) {
-  return jwt.sign({ sub: String(user._id), role: String(user.role?._id || user.role) }, env.accessSecret, { expiresIn: env.accessTtl });
+function signAccess(user, unit) {
+  return jwt.sign({ sub: String(user._id), role: String(user.role?._id || user.role), ...(unit ? { unit } : {}) }, env.accessSecret, { expiresIn: env.accessTtl });
 }
 
-async function issueRefresh(req, res, user) {
+async function issueRefresh(req, res, user, unit) {
   const token = crypto.randomBytes(48).toString('hex');
   const expiresAt = new Date(Date.now() + env.refreshTtlDays * 86400000);
-  await Session.create({ user: user._id, tokenHash: hash(token), expiresAt, ip: req.ip, userAgent: req.headers['user-agent'] });
+  await Session.create({ user: user._id, tokenHash: hash(token), expiresAt, ip: req.ip, userAgent: req.headers['user-agent'], unit });
   res.cookie(COOKIE, token, {
     httpOnly: true, secure: env.isProd, sameSite: 'strict', expires: expiresAt, path: '/api/auth',
   });
   return token;
 }
 
-export function userPayload(user) {
+/** user + the units they may enter + the unit selected for this session (null → "Select Unit"). */
+export async function userPayload(user, unit) {
   const perms = effectivePermissions(user);
+  const config = await getSetting('units');
+  const codes = allowedUnits(user);
+  const units = config.filter((u) => codes.includes(u.code)).map(({ code, name, prefix }) => ({ code, name, prefix }));
   return {
     _id: user._id, name: user.name, email: user.email, department: user.department,
     role: user.role ? { _id: user.role._id, name: user.role.name, isAdmin: user.role.isAdmin, dashboard: user.role.dashboard } : null,
     mustChangePassword: user.mustChangePassword, isAdmin: perms.isAdmin, permissions: perms.map,
+    units, unit: units.find((u) => u.code === unit) || null,
   };
 }
 
@@ -62,11 +68,13 @@ r.post('/login', loginLimiter, asyncHandler(async (req, res) => {
     await audit({ user, ip: req.ip, headers: req.headers }, { action: 'LOGIN_FAILED', module: 'auth', message: `Failed login for ${email}` });
     throw fail();
   }
+  if (!allowedUnits(user).length) throw ApiError.forbidden('No unit is assigned to your account – contact Admin');
   user.failedLogins = 0; user.lockUntil = null; user.lastLoginAt = new Date(); user.lastLoginIp = req.ip;
   await user.save();
   await issueRefresh(req, res, user);
   await audit({ user, ip: req.ip, headers: req.headers }, { action: 'LOGIN', module: 'auth', message: `${user.name} signed in` });
-  res.json({ accessToken: signAccess(user), user: userPayload(user) });
+  // step 2 of the login happens in the client: "Select Unit"
+  res.json({ accessToken: signAccess(user), user: await userPayload(user) });
 }));
 
 r.post('/refresh', asyncHandler(async (req, res) => {
@@ -81,10 +89,23 @@ r.post('/refresh', asyncHandler(async (req, res) => {
   }
   const user = await User.findById(session.user).populate('role');
   if (!user || !user.isActive || user.isDeleted) throw ApiError.unauthorized('Account disabled');
-  const next = await issueRefresh(req, res, user);
+  const unit = allowedUnits(user).includes(session.unit) ? session.unit : undefined;
+  const next = await issueRefresh(req, res, user, unit);
   session.revokedAt = new Date(); session.replacedBy = hash(next);
   await session.save();
-  res.json({ accessToken: signAccess(user), user: userPayload(user) });
+  res.json({ accessToken: signAccess(user, unit), user: await userPayload(user, unit) });
+}));
+
+/* Step 2 of login – and "Switch Unit": bind the session to one of the user's units. */
+r.post('/select-unit', authenticate, asyncHandler(async (req, res) => {
+  const unit = String(req.body.unit || '');
+  if (!req.units.includes(unit)) throw ApiError.forbidden('You are not assigned to this unit');
+  const token = req.cookies?.[COOKIE];
+  if (token) await Session.updateOne({ tokenHash: hash(token), revokedAt: null }, { $set: { unit } });
+  const name = (await getSetting('units')).find((u) => u.code === unit)?.name || unit;
+  const verb = req.unit && req.unit !== unit ? `switched from ${req.unit} to` : 'entered';
+  await audit({ user: req.user, ip: req.ip, headers: req.headers, unit }, { action: req.unit ? 'UNIT_SWITCH' : 'UNIT_SELECT', module: 'auth', message: `${req.user.name} ${verb} ${name}` });
+  res.json({ accessToken: signAccess(req.user, unit), user: await userPayload(req.user, unit) });
 }));
 
 r.post('/logout', asyncHandler(async (req, res) => {
@@ -94,7 +115,7 @@ r.post('/logout', asyncHandler(async (req, res) => {
   res.json({ ok: true });
 }));
 
-r.get('/me', authenticate, (req, res) => res.json(userPayload(req.user)));
+r.get('/me', authenticate, asyncHandler(async (req, res) => res.json(await userPayload(req.user, req.unit))));
 
 r.post('/change-password', authenticate, asyncHandler(async (req, res) => {
   const { currentPassword, newPassword } = req.body;
@@ -108,9 +129,10 @@ r.post('/change-password', authenticate, asyncHandler(async (req, res) => {
   await user.save();
   await Session.updateMany({ user: user._id, revokedAt: null }, { revokedAt: new Date() });
   clearUserCache(user._id);
-  await issueRefresh(req, res, user);
+  const unit = allowedUnits(user).includes(req.unit) ? req.unit : undefined;
+  await issueRefresh(req, res, user, unit);
   await audit(req, { action: 'PASSWORD_CHANGE', module: 'auth', message: `${user.name} changed password` });
-  res.json({ accessToken: signAccess(user), user: userPayload(user) });
+  res.json({ accessToken: signAccess(user, unit), user: await userPayload(user, unit) });
 }));
 
 export default r;

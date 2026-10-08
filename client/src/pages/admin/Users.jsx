@@ -8,8 +8,9 @@ import { DataTable } from '../../components/DataTable.jsx';
 import PermissionMatrix from '../../components/PermissionMatrix.jsx';
 import { DEPARTMENTS } from '@shared/constants.js';
 import { fmtDateTime } from '../../utils/format.js';
+import { useUnitName } from '../../components/UnitScope.jsx';
 
-const blank = { name: '', email: '', password: '', role: '', department: '', phone: '', isActive: true, permissions: {}, revoked: {} };
+const blank = { name: '', email: '', password: '', role: '', department: '', phone: '', units: [], isActive: true, permissions: {}, revoked: {} };
 
 export default function Users() {
   const { can, user: me } = useAuth();
@@ -21,18 +22,20 @@ export default function Users() {
   const [edit, setEdit] = useState(null);
   const [tab, setTab] = useState('profile');
   const [loading, setLoading] = useState(true);
+  const [unitFilter, setUnitFilter] = useState('');
+  const unitName = useUnitName();
 
   const load = () => {
     setLoading(true);
-    api.get('/admin/users', { params: { q: q || undefined, deleted: deleted ? 'true' : undefined } }).then((r) => setRows(r.data.rows)).catch((e) => toast(errMsg(e), 'err')).finally(() => setLoading(false));
+    api.get('/admin/users', { params: { q: q || undefined, deleted: deleted ? 'true' : undefined, unit: unitFilter || undefined } }).then((r) => setRows(r.data.rows)).catch((e) => toast(errMsg(e), 'err')).finally(() => setLoading(false));
   };
-  useEffect(load, [q, deleted]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(load, [q, deleted, unitFilter]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { api.get('/admin/roles').then((r) => setRoles(r.data)).catch(() => {}); }, []);
 
   const roleOf = (id) => roles.rows.find((r) => r._id === id);
   const open = (u) => {
     setTab('profile');
-    setEdit(u ? { ...blank, ...u, role: u.role?._id || u.role, password: '' } : { ...blank, role: roles.rows.find((r) => !r.isAdmin)?._id || '' });
+    setEdit(u ? { ...blank, ...u, units: u.units || [], role: u.role?._id || u.role, password: '' } : { ...blank, units: [me.unit.code], role: roles.rows.find((r) => !r.isAdmin)?._id || '' });
   };
 
   const save = async () => {
@@ -58,6 +61,7 @@ export default function Users() {
     { key: 'name', label: 'User', render: (u) => <div className="row"><div className="avatar" style={{ width: 30, height: 30, fontSize: 11 }}>{u.name.split(' ').map((s) => s[0]).join('').slice(0, 2)}</div><div><b>{u.name}</b><div className="muted small">{u.email}</div></div></div> },
     { key: 'department', label: 'Department' },
     { key: 'role', label: 'Role', render: (u) => <Badge tone={u.role?.isAdmin ? 'violet' : 'primary'} dot={false}>{u.role?.name}</Badge> },
+    { key: 'units', label: 'Units', render: (u) => (u.role?.isAdmin ? <Badge tone="violet" dot={false}>All units</Badge> : <div className="row-wrap" style={{ gap: 4 }}>{(u.units || []).map((x) => <Badge key={x} tone="blue" dot={false}>{unitName(x)}</Badge>)}</div>) },
     { key: 'extra', label: 'Custom perms', render: (u) => (Object.keys(u.permissions || {}).length || Object.keys(u.revoked || {}).length ? <Badge tone="amber">customised</Badge> : <span className="muted">role</span>) },
     { key: 'lastLoginAt', label: 'Last login', render: (u) => <span className="small">{fmtDateTime(u.lastLoginAt)}</span> },
     { key: 'isActive', label: 'Status', render: (u) => (u.isDeleted ? <button className="btn btn-sm" onClick={(e) => { e.stopPropagation(); restore(u); }}>Restore</button> : <div className="row"><StatusBadge status={u.isActive ? 'Active' : 'Inactive'} />{u.mustChangePassword && <Badge tone="amber" dot={false}>pw change</Badge>}</div>) },
@@ -72,6 +76,7 @@ export default function Users() {
       <Card pad={false}>
         <div className="table-toolbar">
           <div className="search"><Icon name="Search" size={15} /><input className="search-input" placeholder="Search users…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+          {me.isAdmin && <select value={unitFilter} onChange={(e) => setUnitFilter(e.target.value)} style={{ width: 'auto' }}><option value="">All units</option>{me.units.map((u) => <option key={u.code} value={u.code}>{u.name}</option>)}</select>}
           {me.isAdmin && <label className="check small"><input type="checkbox" checked={deleted} onChange={(e) => setDeleted(e.target.checked)} /> Deleted</label>}
         </div>
         <DataTable columns={columns} rows={rows} loading={loading} onRowClick={(u) => !u.isDeleted && open(u)} empty={<Empty icon="Users" title="No users" />} />
@@ -100,6 +105,14 @@ export default function Users() {
                 </Field>
                 <Field label="Department"><select value={edit.department || ''} onChange={(e) => setEdit({ ...edit, department: e.target.value })}><option value="">—</option>{DEPARTMENTS.map((d) => <option key={d}>{d}</option>)}</select></Field>
                 <Field label="Phone"><input value={edit.phone || ''} onChange={(e) => setEdit({ ...edit, phone: e.target.value })} /></Field>
+                <Field label="Units" required={!role?.isAdmin} hint={role?.isAdmin ? 'Admin role reaches every unit' : 'The user can only select and see these units'}>
+                  <div className="row-wrap" style={{ minHeight: 38 }}>
+                    {me.units.map((u) => (
+                      <label key={u.code} className="check"><input type="checkbox" disabled={role?.isAdmin} checked={role?.isAdmin || (edit.units || []).includes(u.code)}
+                        onChange={(e) => setEdit({ ...edit, units: e.target.checked ? [...new Set([...(edit.units || []), u.code])] : (edit.units || []).filter((x) => x !== u.code) })} /> {u.name}</label>
+                    ))}
+                  </div>
+                </Field>
                 {edit._id && <Field label=" "><label className="check"><input type="checkbox" checked={edit.isActive} onChange={(e) => setEdit({ ...edit, isActive: e.target.checked })} /> Account active</label></Field>}
               </div>
               {role && <div className="alert alert-info mt"><Icon name="Info" size={16} /> {role.isAdmin ? 'Admin role has complete access to everything.' : `Role "${role.name}" grants ${Object.keys(role.permissions || {}).length} modules. Use the other tabs to add or remove individual permissions for this user.`}</div>}

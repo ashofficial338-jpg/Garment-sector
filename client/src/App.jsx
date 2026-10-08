@@ -4,6 +4,7 @@ import { useAuth } from './auth/AuthContext.jsx';
 import Layout from './layout/Layout.jsx';
 import Login from './pages/Login.jsx';
 import ChangePassword from './pages/ChangePassword.jsx';
+import SelectUnit from './pages/SelectUnit.jsx';
 import { Loading } from './components/ui.jsx';
 
 const Dashboard = lazy(() => import('./pages/Dashboard.jsx'));
@@ -28,6 +29,7 @@ export default function App() {
   if (!ready) return <Loading />;
   if (!user) return <Routes><Route path="*" element={<Login />} /></Routes>;
   if (user.mustChangePassword) return <Routes><Route path="*" element={<ChangePassword />} /></Routes>;
+  if (!user.unit) return <SelectUnit />;
 
   return (
     <Suspense fallback={<Loading />}>

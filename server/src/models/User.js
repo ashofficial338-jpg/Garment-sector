@@ -6,6 +6,8 @@ const userSchema = new mongoose.Schema({
   passwordHash: { type: String, required: true, select: false },
   role: { type: mongoose.Schema.Types.ObjectId, ref: 'Role', required: true },
   department: { type: String, index: true },
+  /** Business units this user may work in (Admin: all units) */
+  units: { type: [String], default: undefined },
   phone: String,
   /** Extra per-user permissions on top of the role: { moduleKey: ['view','edit',...] } */
   permissions: { type: Map, of: [String], default: {} },

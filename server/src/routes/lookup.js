@@ -3,6 +3,7 @@ import express from 'express';
 import mongoose from 'mongoose';
 import { models } from '../modules/builder.js';
 import { User } from '../models/User.js';
+import { Role } from '../models/Role.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 import { escapeRegex } from '../utils/query.js';
@@ -17,6 +18,9 @@ const SOURCES = {
   Costing: { model: 'costing', fields: 'refNo styleNo buyerName status sellingPrice', search: ['refNo', 'styleNo', 'buyerName'], label: (x) => `${x.refNo} · ${x.styleNo} · ${x.status}` },
   Quotation: { model: 'quotation', fields: 'refNo styleNo buyerName version status', search: ['refNo', 'styleNo'], label: (x) => `${x.refNo} v${x.version} · ${x.styleNo}` },
   Invoice: { model: 'invoice', fields: 'refNo invoiceNo jobNo totalAmount outstanding currency', search: ['invoiceNo', 'jobNo'], label: (x) => `${x.invoiceNo} · ${x.jobNo} · O/S ${x.outstanding} ${x.currency}` },
+  TechSpec: { model: 'techSpec', fields: 'refNo jobNo revision status', search: ['refNo', 'jobNo'], label: (x) => `${x.refNo} rev ${x.revision || 1} · ${x.jobNo} · ${x.status}` },
+  Pattern: { model: 'pattern', fields: 'refNo jobNo patternNo revision status', search: ['refNo', 'patternNo', 'jobNo'], label: (x) => `${x.patternNo} rev ${x.revision || 1} · ${x.jobNo} · ${x.status}` },
+  Marker: { model: 'marker', fields: 'refNo jobNo markerNo ratio status', search: ['refNo', 'markerNo', 'jobNo'], label: (x) => `${x.markerNo} · ${x.ratio || ''} · ${x.status}` },
   Shipment: { model: 'shipment', fields: 'refNo invoiceNo jobNo qty status', search: ['refNo', 'invoiceNo', 'jobNo'], label: (x) => `${x.refNo} · ${x.jobNo} · ${x.qty} pcs` },
 };
 
@@ -25,8 +29,10 @@ r.get('/master/:type', asyncHandler(async (req, res) => {
   res.json(rows);
 }));
 
-r.get('/users', asyncHandler(async (_req, res) => {
-  const rows = await User.find({ isDeleted: false, isActive: true }).select('name department').sort({ name: 1 }).lean();
+r.get('/users', asyncHandler(async (req, res) => {
+  // people who work in the current unit (Admin-role users reach every unit)
+  const adminRoles = await Role.find({ isAdmin: true }).select('_id').lean();
+  const rows = await User.find({ isDeleted: false, isActive: true, $or: [{ units: req.unit }, { role: { $in: adminRoles.map((x) => x._id) } }] }).select('name department').sort({ name: 1 }).lean();
   res.json(rows.map((u) => ({ _id: u._id, label: `${u.name} (${u.department || '-'})` })));
 }));
 
