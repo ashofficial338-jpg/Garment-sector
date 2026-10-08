@@ -16,7 +16,7 @@ export const DEFAULT_WORKFLOW = LIFECYCLE_STAGES.map((s) => ({
 
 export const DEFAULTS = {
   units: DEFAULT_UNITS,
-  subJob: { prefix: 'F', digits: 2 },
+  subJob: { prefix: 'S', digits: 2 }, // U1-1000-S01
   tolerance: { shortShipPct: 3, overCutPct: 5, overShipPct: 0 },
   workflow: DEFAULT_WORKFLOW,
   notifications: { tnaDelay: true, fabricShortage: true, trimShortage: true, approvalPending: true, productionDelay: true, qualityFailure: true, shipmentDelay: true, paymentDue: true, paymentDueDays: 7, jobReadyToClose: true },

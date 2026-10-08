@@ -23,7 +23,9 @@ export const NAV = [
     { to: '/m/sample', label: 'Sampling & Approval', icon: 'Shirt', perm: ['sample'] },
   ] },
   { group: 'Materials', items: [
+    { to: '/m/fabricForecast', label: 'Fabric Forecast', icon: 'CalendarRange', perm: ['fabricForecast'] },
     { to: '/m/fabricBooking', label: 'Fabric Booking', icon: 'Layers', perm: ['fabricBooking'] },
+    { to: '/m/fabricTransfer', label: 'Fabric Transfer', icon: 'ArrowRightLeft', perm: ['fabricTransfer'] },
     { to: '/m/trimBooking', label: 'Trim Booking', icon: 'Tag', perm: ['trimBooking'] },
   ] },
   { group: 'Fabric Stock', items: [

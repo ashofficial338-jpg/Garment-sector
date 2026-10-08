@@ -8,3 +8,6 @@ client/dist/
 .env*
 !server/.env.example
 !client/.env.remote
+
+# sample-data reset backups (contain business data)
+server/backups/

@@ -207,6 +207,24 @@ function Tower({ jobNo }) {
                     </table>
                   ) : <Empty icon="Inbox" title={isMain ? 'Tracked on sub jobs' : 'No records yet'} />)}
                   {focusStage === 'tna' && records.tna[0] && <TnaGantt tna={records.tna[0]} />}
+                  {focusStage === 'fabric' && (records.fabricForecast?.length > 0 || records.fabricTransfer?.length > 0) && (
+                    <div className="mt">
+                      {records.fabricForecast.length > 0 && <><div className="form-section-title">Fabric forecast</div>
+                        <table className="tbl tbl-mini"><tbody>{records.fabricForecast.map((r) => (
+                          <tr key={r._id} className="click" onClick={() => setOpen({ def: MODULES.fabricForecast, id: r._id })}>
+                            <td className="mono link nowrap">{r.refNo}</td>
+                            <td>{r.fabricType} {r.color} · lot {r.lotNo || '—'} · forecast {fmtNum(r.forecastQty, 1)} / rcvd {fmtNum(r.receivedQty, 1)} / transferred {fmtNum(r.transferredQty, 1)} / balance {fmtNum(r.balanceQty, 1)} {r.unit}{r.excessQty > 0 ? ` · excess ${fmtNum(r.excessQty, 1)}` : ''}</td>
+                            <td className="right"><StatusBadge status={r.status} /></td>
+                          </tr>))}</tbody></table></>}
+                      {records.fabricTransfer.length > 0 && <><div className="form-section-title mt">Fabric transfers</div>
+                        <table className="tbl tbl-mini"><tbody>{records.fabricTransfer.map((r) => (
+                          <tr key={r._id} className="click" onClick={() => setOpen({ def: MODULES.fabricTransfer, id: r._id })}>
+                            <td className="mono link nowrap">{r.refNo}</td>
+                            <td>{fmtDate(r.transferDate)} · {fmtNum(r.qty, 1)} {r.unit} · {r.fromUnit} <b>{r.jobNo}</b> → {r.toUnit} <b>{r.toJobNo ? <Link to={`/jobs/${r.toJobNo}`} onClick={(e) => e.stopPropagation()}>{r.toJobNo}</Link> : 'new sub job'}</b> · {r.reason} · {r.referenceDoc} · {r.createdByName}</td>
+                            <td className="right"><StatusBadge status={r.status} /></td>
+                          </tr>))}</tbody></table></>}
+                    </div>
+                  )}
                 </div>
               );
             })()}

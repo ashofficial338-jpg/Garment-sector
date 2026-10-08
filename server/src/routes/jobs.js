@@ -10,7 +10,7 @@ import { ApiError } from '../utils/ApiError.js';
 import { diffObjects } from '../utils/diff.js';
 import { audit, describeChanges } from '../services/audit.js';
 import { notify } from '../services/notify.js';
-import { createJob, convertQuotation, createSubJobs, propagateJobChanges, generateDownstream } from '../services/orderFlow.js';
+import { createJob, convertQuotation, createSubJobs, propagateJobChanges, generateDownstream, ensureFabricForecast } from '../services/orderFlow.js';
 import { refreshJob, loadJobGraph, computeStages, computeProfit } from '../services/lifecycle.js';
 import { AuditLog } from '../models/AuditLog.js';
 import { num, sum } from '../../../shared/calc.js';
@@ -132,6 +132,8 @@ r.get('/track/:key', permit('jobs', 'view'), asyncHandler(async (req, res) => {
       ppMeeting: pickRows(g.ppm, ['meetingDate', 'fabricStatus', 'trimStatus']),
       fabricBooking: pickRows(g.fabric, ['fabricType', 'color', 'unit', 'requiredQty', 'bookedQty', 'receivedQty', 'issuedQty', 'balanceQty', 'shortageQty', 'closureVerdict']),
       trimBooking: pickRows(g.trims, ['item', 'bookingQty', 'receivedQty', 'shortageQty']),
+      fabricForecast: pickRows(g.forecasts, ['fabricType', 'color', 'unit', 'lotNo', 'forecastQty', 'receivedQty', 'transferredQty', 'balanceQty', 'excessQty', 'requiredDate']),
+      fabricTransfer: pickRows(g.transfers, ['transferDate', 'fabric', 'qty', 'unit', 'fromUnit', 'toUnit', 'toJobNo', 'jobNo', 'reason', 'referenceDoc', 'destinationBooking', 'createdByName']),
       sample: pickRows(g.samples, ['sampleType', 'sentDate', 'buyerApprovalDate', 'revision']),
       productionPlan: pickRows(g.plans, ['line', 'dailyTarget', 'plannedStart', 'plannedEnd', 'actualProduction', 'achievementPct']),
       cutting: pickRows(g.cutting, ['entryDate', 'cutQty', 'wastagePct']),
@@ -180,7 +182,7 @@ r.put('/:id/subjobs/:subId', adminOnly, asyncHandler(async (req, res) => {
 /* Regenerate missing downstream records (Admin) */
 r.post('/:id/regenerate', adminOnly, asyncHandler(async (req, res) => {
   const job = (await findJob(req.params.id)).toObject();
-  const created = await generateDownstream(job, req);
+  const created = job.isForecast && !job.parentJob ? [await ensureFabricForecast(job, req)].filter(Boolean) : await generateDownstream(job, req);
   await refreshJob(job._id);
   res.json({ created: created.length });
 }));

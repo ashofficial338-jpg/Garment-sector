@@ -10,8 +10,10 @@ import { trimInventoryCategory } from '../../../shared/costHeads.js';
 import { num, round } from '../../../shared/calc.js';
 
 const SOURCES = {
-  fabricBooking: { category: () => 'Fabric', item: (r) => [r.fabricType, r.color].filter(Boolean).join(' · '), rate: (r) => num(r.rate) },
-  trimBooking: { category: (r) => trimInventoryCategory(r.item), item: (r) => [r.item, r.description].filter(Boolean).join(' · '), rate: (r) => num(r.rate) },
+  fabricBooking: { category: () => 'Fabric', item: (r) => [r.fabricType, r.color].filter(Boolean).join(' · '), rate: (r) => num(r.rate), in: 'receivedQty', out: 'issuedQty' },
+  trimBooking: { category: (r) => trimInventoryCategory(r.item), item: (r) => [r.item, r.description].filter(Boolean).join(' · '), rate: (r) => num(r.rate), in: 'receivedQty', out: 'issuedQty' },
+  // bulk forecast fabric: received against the forecast, out when transferred to a job / sub job
+  fabricForecast: { category: () => 'Fabric', item: (r) => [r.fabricType, r.color, r.lotNo].filter(Boolean).join(' · '), rate: (r) => num(r.rate), in: 'receivedQty', out: 'transferredQty' },
 };
 
 /** When a booking reached a status (from its history), used to date back-filled movements. */
@@ -25,12 +27,12 @@ export async function syncLedger(module, recOrId, { date, deleted = false } = {}
   const posted = await StockMovement.find({ recordId: rec._id, businessUnit: rec.businessUnit }).lean();
   const held = (dir) => posted.filter((m) => m.direction === dir).reduce((t, m) => t + num(m.qty), 0);
   const gone = deleted || rec.isDeleted;
-  const target = { in: gone ? 0 : num(rec.receivedQty), out: gone ? 0 : num(rec.issuedQty) };
+  const target = { in: gone ? 0 : num(rec[src.in]), out: gone ? 0 : num(rec[src.out]) };
   const out = [];
   for (const dir of ['in', 'out']) {
     const delta = round(target[dir] - held(dir), 4);
     if (!delta) continue;
-    const when = date || (posted.length ? new Date() : (dir === 'in' ? reachedAt(rec, ['Received', 'Inspected', 'Approved']) : reachedAt(rec, ['Issued', 'Consumed', 'Fully Consumed'])) || rec.updatedAt || new Date());
+    const when = date || (dir === 'in' && rec.receivedDate) || (posted.length ? new Date() : (dir === 'in' ? reachedAt(rec, ['Received', 'Inspected', 'Approved']) : reachedAt(rec, ['Issued', 'Consumed', 'Fully Consumed', 'Allocated'])) || rec.updatedAt || new Date());
     out.push({
       date: when, category: src.category(rec), direction: dir, qty: delta, unit: rec.unit, rate: src.rate(rec),
       value: round(delta * src.rate(rec), 2), item: src.item(rec), module, recordId: rec._id, refNo: rec.refNo,
@@ -47,7 +49,8 @@ export async function backfillLedger() {
   let n = 0;
   for (const module of Object.keys(SOURCES)) {
     const done = new Set((await StockMovement.distinct('recordId', { module })).map(String));
-    const recs = await models[module].find({ $or: [{ receivedQty: { $gt: 0 } }, { issuedQty: { $gt: 0 } }] }).lean();
+    const { in: inF, out: outF } = SOURCES[module];
+    const recs = await models[module].find({ $or: [{ [inF]: { $gt: 0 } }, { [outF]: { $gt: 0 } }] }).lean();
     for (const r of recs) if (!done.has(String(r._id))) n += (await syncLedger(module, r)).length;
   }
   return n;

@@ -15,8 +15,8 @@ export function Icon({ name, size = 18, ...rest }) {
   return <C size={size} strokeWidth={1.9} {...rest} />;
 }
 
-const GREEN = ['done', 'Approved', 'Completed', 'Passed', 'Fully Paid', 'Closed', 'Shipped', 'Delivered', 'Final Approved', 'Active', 'Verified', 'Reconciled', 'Received', 'Issued', 'Fully Consumed', 'Fabric Job Closed', 'Consumed', 'Held', 'completed', 'Ready', 'Yes', 'Pattern Approved', 'Graded', 'Issued to Cutting'];
-const AMBER = ['active', 'In Progress', 'Booked', 'Submitted', 'Sent', 'Under Review', 'Buyer Review', 'Partial', 'Running', 'Released', 'Inspection', 'Re-inspection', 'Packed', 'Stuffed', 'In Production', 'In Transit', 'Inspected', 'Scheduled', 'Revised', 'Costing', 'Quoted', 'On Leave', 'inProgress', 'Planned', 'Open', 'On Hold', 'CAD Drafting', 'Pattern Ready'];
+const GREEN = ['done', 'Approved', 'Completed', 'Passed', 'Fully Paid', 'Closed', 'Shipped', 'Delivered', 'Final Approved', 'Active', 'Verified', 'Reconciled', 'Received', 'Issued', 'Fully Consumed', 'Fabric Job Closed', 'Consumed', 'Held', 'completed', 'Ready', 'Yes', 'Pattern Approved', 'Graded', 'Issued to Cutting', 'Allocated'];
+const AMBER = ['active', 'In Progress', 'Booked', 'Submitted', 'Sent', 'Under Review', 'Buyer Review', 'Partial', 'Running', 'Released', 'Inspection', 'Re-inspection', 'Packed', 'Stuffed', 'In Production', 'In Transit', 'Inspected', 'Scheduled', 'Revised', 'Costing', 'Quoted', 'On Leave', 'inProgress', 'Planned', 'Open', 'On Hold', 'CAD Drafting', 'Pattern Ready', 'Forecast', 'Requested'];
 const RED = ['delayed', 'Rejected', 'Failed', 'Cancelled', 'Delayed', 'Resigned', 'Issue', 'Inactive'];
 const VIOLET = ['Ready to Close', 'READY TO CLOSE', 'READY TO CLOSE / EXCESS BALANCE'];
 const BLUE = ['Confirmed', 'Converted', 'Draft'];

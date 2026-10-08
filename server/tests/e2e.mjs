@@ -200,13 +200,15 @@ ok(true, 'fabric job closed');
 // Forecast / sub jobs
 const fj = await call('POST', '/jobs', { buyer: buyer._id, poNo: 'FC-2026', styleNo: 'NA-FC-1', orderDate: '2026-09-20', orderQty: 30000, unitPrice: 3.2, shipmentDate: '2027-03-01', isForecast: true, forecastQty: 30000, consumption: 0.2, fabricType: 'Fleece' });
 const subs = await call('POST', `/jobs/${fj._id}/subjobs`, { subJobs: [{ orderQty: 10000 }, { orderQty: 8000 }, { orderQty: 12000 }] });
-ok(subs.map((s) => s.jobNo).join() === `${fj.jobNo}-F01,${fj.jobNo}-F02,${fj.jobNo}-F03`, `sub jobs ${subs.map((s) => s.jobNo).join(', ')}`);
+ok(subs.map((s) => s.jobNo).join() === `${fj.jobNo}-S01,${fj.jobNo}-S02,${fj.jobNo}-S03`, `sub jobs ${subs.map((s) => s.jobNo).join(', ')}`);
+const ffc = await call('GET', `/m/fabricForecast?job=${fj.jobNo}`);
+ok(ffc.total === 1 && ffc.rows[0].jobNo === fj.jobNo && ffc.rows[0].forecastQty === 6000, `forecast main job has its fabric forecast (${ffc.rows[0]?.forecastQty} ${ffc.rows[0]?.unit})`);
 await call('POST', `/jobs/${fj._id}/subjobs`, { subJobs: [{ orderQty: 1 }] }, [400]);
 ok(true, 'sub job total cannot exceed forecast qty');
 const ft = await call('GET', `/jobs/track/${fj.jobNo}`);
 ok(ft.job.orderQty === 30000 && ft.lifecycle.meta.subJobs.length === 3, 'main job qty = sum of sub jobs');
 const sfb = await call('GET', `/m/fabricBooking?job=${subs[0].jobNo}`);
-ok(sfb.rows[0]?.requiredQty === 2000, `sub job F01 has its own fabric requirement (${sfb.rows[0]?.requiredQty})`);
+ok(sfb.rows[0]?.requiredQty === 2000, `sub job S01 has its own fabric requirement (${sfb.rows[0]?.requiredQty})`);
 
 // Order change impact
 const upd = await call('PUT', `/jobs/${subs[1]._id}`, { consumption: 0.22 });

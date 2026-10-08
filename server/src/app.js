@@ -23,7 +23,8 @@ function sanitizeInput(obj) {
   return obj;
 }
 
-export function createApp() {
+/** `rateLimit: false` only for trusted in-process tools (sample data script) bound to 127.0.0.1. */
+export function createApp({ rateLimit: limitRequests = true } = {}) {
   const app = express();
   // Number of reverse proxies in front of the app (Render = 1; Vercel rewrite → Render = 2)
   app.set('trust proxy', env.trustProxy);
@@ -42,7 +43,7 @@ export function createApp() {
     res.status(db ? 200 : 503).json({ status: db ? 'OK' : 'DEGRADED', db: db ? 'connected' : 'disconnected', time: new Date().toISOString() });
   });
 
-  app.use('/api', rateLimit({ windowMs: 60 * 1000, limit: 600, standardHeaders: true, legacyHeaders: false }));
+  if (limitRequests) app.use('/api', rateLimit({ windowMs: 60 * 1000, limit: 600, standardHeaders: true, legacyHeaders: false }));
   app.use('/api', api);
   app.use('/api', notFound);
 

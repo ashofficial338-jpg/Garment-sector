@@ -152,6 +152,13 @@ export async function createBookingsFromBom(bomId, req) {
   return created;
 }
 
+/** Forecast / continuous main job: bulk fabric is forecast on the main job (sub jobs get it by transfer). */
+export async function ensureFabricForecast(job, req) {
+  if (!job.isForecast || job.parentJob || (!job.fabricType && !num(job.consumption))) return null;
+  if (await models.fabricForecast.exists({ job: job._id, isDeleted: false })) return null;
+  return createLinked('fabricForecast', job, { requiredDate: job.orderDate || new Date() }, req);
+}
+
 async function buyerName(buyerId) {
   if (!buyerId) return undefined;
   const b = await models.buyer.findById(buyerId).lean();
@@ -177,6 +184,7 @@ export async function createJob(data, req, { skipDownstream = false } = {}) {
   });
   await audit(req, { action: 'CREATE', module: 'orders', record: job, message: `Order confirmed – Job ${jobNo} generated` });
   if (!skipDownstream && !job.isForecast) await generateDownstream(job.toObject(), req);
+  if (!skipDownstream && job.isForecast) await ensureFabricForecast(job.toObject(), req);
   await refreshJob(job._id);
   return job;
 }

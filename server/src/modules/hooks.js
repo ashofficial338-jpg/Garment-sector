@@ -19,6 +19,7 @@ import { yarnAvailable, stageAvailable } from '../services/stock.js';
 import { completeTna, syncPpReadiness, PATTERN_DONE } from '../services/preproduction.js';
 import { createBookingsFromBom } from '../services/orderFlow.js';
 import { syncLedger } from '../services/stockLedger.js';
+import { executeTransfer, resolveDestination } from '../services/fabricTransfer.js';
 
 /** True when a save / status change moved the record into `status` (not already there). */
 const reached = (ctx, status) => ctx.saved?.status === status && ctx.existing?.status !== status;
@@ -189,6 +190,46 @@ export const hooks = {
         });
       }
       await syncPpReadiness(d.job);
+    },
+  },
+
+  /* ---------------- Fabric forecast & transfer ---------------- */
+  fabricForecast: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      if (ctx.job.parentJob) throw ApiError.badRequest('Fabric is forecast on the main job – sub jobs receive it by transfer');
+      guard(ctx, num(d.receivedQty) + 0.0005 >= num(ctx.existing?.transferredQty), `Received quantity cannot be below what was already transferred (${ctx.existing?.transferredQty})`);
+    },
+    async afterSave(ctx) { await syncLedger('fabricForecast', ctx.saved); },
+    async afterDelete(rec) { await syncLedger('fabricForecast', rec); },
+  },
+  fabricTransfer: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      if (ctx.existing && ['Completed', 'Cancelled'].includes(ctx.existing.status)) throw ApiError.badRequest(`Transfer is ${ctx.existing.status} and cannot be edited`);
+      const f = await models.fabricForecast.findById(d.sourceForecast).lean();
+      if (!f || f.isDeleted || String(f.job) !== String(ctx.job._id)) throw ApiError.badRequest('Select a fabric forecast of the source job');
+      Object.assign(d, { fabric: [f.fabricType, f.color].filter(Boolean).join(' · '), lotNo: f.lotNo || '', unit: f.unit, fromUnit: ctx.job.businessUnit });
+      if (!(num(d.qty) > 0)) throw ApiError.badRequest('Transfer quantity must be greater than 0');
+      const pending = num(f.receivedQty) - num(f.transferredQty);
+      guard(ctx, num(d.qty) <= pending + 0.0005, `Transfer ${d.qty} ${f.unit} exceeds received forecast fabric available (${round(pending, 3)} ${f.unit})`);
+      if (d.createSubJob) {
+        if (!ctx.job.isForecast || ctx.job.parentJob) throw ApiError.badRequest('A new sub job can only be created from a forecast / continuous main job');
+        d.toUnit = ctx.job.businessUnit; d.toJobNo = '';
+      } else {
+        if (!d.toJobNo) throw ApiError.badRequest('Destination Job No is required (or tick "Create a new Sub-Job")');
+        await resolveDestination(d, ctx.req, ctx.job);
+      }
+    },
+    async beforeStatus(ctx) {
+      if (ctx.to !== 'Completed') return;
+      if (ctx.doc.createSubJob && !ctx.req.perms.isAdmin) throw ApiError.forbidden('Only Admin can create sub jobs (complete this transfer as Admin)');
+      const f = await models.fabricForecast.findById(ctx.doc.sourceForecast).lean();
+      const pending = num(f?.receivedQty) - num(f?.transferredQty);
+      guard(ctx, num(ctx.doc.qty) <= pending + 0.0005, `Only ${round(pending, 3)} ${f?.unit || ''} of received forecast fabric is still available`);
+    },
+    async afterSave(ctx) {
+      if (reached(ctx, 'Completed')) await executeTransfer(ctx.saved._id, ctx.req);
     },
   },
 

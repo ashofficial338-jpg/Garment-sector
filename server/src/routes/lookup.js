@@ -18,6 +18,7 @@ const SOURCES = {
   Costing: { model: 'costing', fields: 'refNo styleNo buyerName status sellingPrice', search: ['refNo', 'styleNo', 'buyerName'], label: (x) => `${x.refNo} · ${x.styleNo} · ${x.status}` },
   Quotation: { model: 'quotation', fields: 'refNo styleNo buyerName version status', search: ['refNo', 'styleNo'], label: (x) => `${x.refNo} v${x.version} · ${x.styleNo}` },
   Invoice: { model: 'invoice', fields: 'refNo invoiceNo jobNo totalAmount outstanding currency', search: ['invoiceNo', 'jobNo'], label: (x) => `${x.invoiceNo} · ${x.jobNo} · O/S ${x.outstanding} ${x.currency}` },
+  FabricForecast: { model: 'fabricForecast', fields: 'refNo jobNo fabricType color unit lotNo receivedQty transferredQty balanceQty status', search: ['refNo', 'jobNo', 'fabricType', 'lotNo'], label: (x) => `${x.refNo} · ${x.fabricType} ${x.color || ''} · lot ${x.lotNo || '—'} · available ${x.balanceQty ?? 0} ${x.unit || ''}` },
   TechSpec: { model: 'techSpec', fields: 'refNo jobNo revision status', search: ['refNo', 'jobNo'], label: (x) => `${x.refNo} rev ${x.revision || 1} · ${x.jobNo} · ${x.status}` },
   Pattern: { model: 'pattern', fields: 'refNo jobNo patternNo revision status', search: ['refNo', 'patternNo', 'jobNo'], label: (x) => `${x.patternNo} rev ${x.revision || 1} · ${x.jobNo} · ${x.status}` },
   Marker: { model: 'marker', fields: 'refNo jobNo markerNo ratio status', search: ['refNo', 'markerNo', 'jobNo'], label: (x) => `${x.markerNo} · ${x.ratio || ''} · ${x.status}` },

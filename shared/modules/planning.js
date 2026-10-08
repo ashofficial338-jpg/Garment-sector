@@ -1,5 +1,5 @@
-import { text, area, n, calc, date, sel, ref, table, flow } from './dsl.js';
-import { UNITS } from '../constants.js';
+import { text, area, n, calc, date, sel, ref, table, bool, flow } from './dsl.js';
+import { UNITS, DEFAULT_UNITS } from '../constants.js';
 import { fabricRequirement, fabricBalance, trimRequirement, tnaRowState, dailyTarget, addWorkingDays, num, round, pct } from '../calc.js';
 import { TRIM_ITEMS } from './commercial.js';
 
@@ -197,4 +197,83 @@ export const productionPlan = {
       achievementPct: pct(d.actualProduction, d.productionQty, 1),
     };
   },
+};
+
+/* ------------------------------ Fabric Forecast (main / continuous jobs) ------------------------------ */
+/**
+ * Bulk fabric forecast against a main (forecast / continuous) job, before or alongside its sub jobs.
+ * Fabric received against the forecast is allocated to production by Fabric Transfers
+ * (into a job's fabric booking, or into a new sub job), so the chain stays traceable:
+ *   Job → Fabric Forecast → receipt → Fabric Transfer → (sub) job fabric booking → cutting.
+ */
+export const fabricForecast = {
+  key: 'fabricForecast', model: 'FabricForecast', title: 'Fabric Forecast', singular: 'Fabric Forecast', group: 'Materials', icon: 'CalendarRange',
+  department: 'Fabric Department', prefix: 'FF', jobLinked: true, stage: 'fabric',
+  ...flow(['Forecast', 'Confirmed', 'Received', 'Allocated', 'Closed'], { Forecast: ['Cancelled'] }), defaultStatus: 'Forecast',
+  fields: [
+    text('fabricType', 'Fabric', { required: true, list: true, search: true, section: 'Fabric' }),
+    text('composition', 'Composition', { search: true }), n('gsm', 'GSM'), n('width', 'Width (inch)'),
+    text('color', 'Color', { list: true }),
+    sel('unit', 'Unit', ['KG', 'Meter', 'Yard'], { default: 'Meter', list: true }),
+    n('garmentQty', 'Forecast Garment Qty (pcs)', { section: 'Forecast' }),
+    n('consumption', 'Consumption / pc'),
+    n('wastagePct', 'Wastage / Loss %', { max: 100 }),
+    calc('forecastQty', 'Fabric Forecast Qty', { list: true }),
+    date('requiredDate', 'Required Date', { required: true, list: true }),
+    ref('supplier', 'Mill / Supplier', 'Supplier', { section: 'Purchase & Receipt' }),
+    text('supplierPoNo', 'Fabric PO No', { search: true }),
+    text('lotNo', 'Lot / Batch No', { search: true, list: true }),
+    n('rate', 'Rate / unit'),
+    n('receivedQty', 'Received Qty', { list: true }), date('receivedDate', 'Received Date'),
+    calc('transferredQty', 'Allocated / Transferred', { section: 'Allocation', list: true }),
+    calc('balanceQty', 'Available Balance', { list: true }),
+    calc('pendingReceipt', 'Pending Receipt'), calc('excessQty', 'Excess over Forecast'),
+    calc('forecastValue', 'Forecast Value'), calc('receivedValue', 'Received Value'),
+    area('remarks', 'Remarks'),
+  ],
+  prefill: (job) => ({
+    fabricType: job.fabricType, composition: job.composition, gsm: job.gsm, width: job.width, color: job.fabricColor,
+    unit: job.consumptionUnit || 'Meter', garmentQty: num(job.forecastQty) || job.orderQty, consumption: job.consumption,
+    wastagePct: ['wastagePct', 'cuttingWastagePct', 'shrinkagePct', 'relaxationPct', 'dyeingLossPct', 'processLossPct'].reduce((t, k) => t + num(job[k]), 0),
+    rate: job.fabricRate, requiredDate: job.orderDate,
+  }),
+  compute(d) {
+    const fq = round(num(d.garmentQty) * num(d.consumption) * (1 + num(d.wastagePct) / 100), 3);
+    const rcv = num(d.receivedQty); const out = num(d.transferredQty);
+    return {
+      forecastQty: fq, balanceQty: round(rcv - out, 3),
+      pendingReceipt: round(Math.max(fq - rcv, 0), 3), excessQty: round(Math.max(rcv - fq, 0), 3),
+      forecastValue: round(fq * num(d.rate)), receivedValue: round(rcv * num(d.rate)),
+    };
+  },
+};
+
+/* ------------------------------ Fabric Transfer ------------------------------ */
+export const TRANSFER_REASONS = ['New production requirement', 'Excess fabric re-use', 'Shortage cover', 'Re-allocation between jobs', 'Sample / development', 'Other'];
+/**
+ * Moves forecast fabric from the source job to production: into another job's fabric booking
+ * (same or other unit) or into a NEW sub job of the source main job. Completing the transfer posts it.
+ */
+export const fabricTransfer = {
+  key: 'fabricTransfer', model: 'FabricTransfer', title: 'Fabric Transfer', singular: 'Fabric Transfer', group: 'Materials', icon: 'ArrowRightLeft',
+  department: 'Fabric Department', prefix: 'FT', jobLinked: true, stage: 'fabric',
+  ...flow(['Requested', 'Approved', 'Completed'], { Requested: ['Cancelled'], Approved: ['Cancelled'] }), defaultStatus: 'Requested',
+  fields: [
+    ref('sourceForecast', 'Source Fabric Forecast', 'FabricForecast', { required: true, jobScoped: true, section: 'Source', hint: 'Fabric received against the source job forecast' }),
+    calc('fromUnit', 'Source Unit', { type: 'text' }),
+    calc('fabric', 'Source Fabric', { type: 'text', list: true }),
+    calc('lotNo', 'Lot / Batch', { type: 'text' }),
+    n('qty', 'Transfer Qty', { required: true, list: true }),
+    calc('unit', 'Unit', { type: 'text' }),
+    date('transferDate', 'Transfer Date', { required: true, list: true }),
+    sel('toUnit', 'Destination Unit', DEFAULT_UNITS.map((u) => u.code), { required: true, section: 'Destination', list: true }),
+    bool('createSubJob', 'Create a new Sub-Job of the source main job for this fabric'),
+    text('toJobNo', 'Destination Job No', { list: true, search: true, hint: 'Leave blank when a new sub job is created' }),
+    n('subJobQty', 'Sub-Job Garment Qty (blank = qty ÷ consumption)'),
+    date('subJobShipmentDate', 'Sub-Job Shipment Date'),
+    calc('destinationBooking', 'Received into Fabric Booking', { type: 'text' }),
+    sel('reason', 'Reason', TRANSFER_REASONS, { required: true, section: 'Reference' }),
+    text('referenceDoc', 'Reference Document', { required: true, search: true }),
+    area('remarks', 'Remarks'),
+  ],
 };

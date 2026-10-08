@@ -14,7 +14,7 @@ import * as preproduction from './preproduction.js';
 const ordered = [
   commercial.enquiry, commercial.costing, commercial.quotation, commercial.orders,
   preproduction.techSpec, preproduction.bom, preproduction.pattern, preproduction.marker,
-  planning.tna, planning.ppMeeting, planning.fabricBooking, planning.trimBooking,
+  planning.tna, planning.ppMeeting, planning.fabricForecast, planning.fabricBooking, planning.fabricTransfer, planning.trimBooking,
   stock.yarnReceipt, stock.knitting, stock.fabricProcess, planning.sample, planning.productionPlan,
   production.cutting, production.sewing, production.finishing, production.packing, production.inspection,
   finance.shipment, finance.invoice, finance.payment, finance.expense,

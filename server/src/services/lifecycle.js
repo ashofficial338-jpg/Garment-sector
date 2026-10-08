@@ -21,6 +21,7 @@ const live = (ids) => ({ job: { $in: ids }, isDeleted: false });
 /** Collect every record linked to the job (and its sub jobs for forecast main jobs). */
 const GRAPH_SOURCES = [
   ['specs', 'techSpec'], ['boms', 'bom'], ['patterns', 'pattern'], ['markers', 'marker'],
+  ['forecasts', 'fabricForecast', { status: { $ne: 'Cancelled' } }], ['transfers', 'fabricTransfer', { status: { $ne: 'Cancelled' } }],
   ['tna', 'tna'], ['ppm', 'ppMeeting'], ['fabric', 'fabricBooking'], ['trims', 'trimBooking'], ['samples', 'sample'], ['plans', 'productionPlan'],
   ['cutting', 'cutting', { status: { $ne: 'Rejected' } }], ['sewing', 'sewing', { status: { $ne: 'Rejected' } }], ['finishing', 'finishing', { status: { $ne: 'Rejected' } }],
   ['packing', 'packing'], ['inspections', 'inspection'], ['shipments', 'shipment', { status: { $ne: 'Cancelled' } }],
@@ -41,7 +42,10 @@ export async function loadJobGraphs(jobs) {
   const commercial = (key, field) => models[key].find({ isDeleted: false, $or: [{ job: { $in: allIds } }, { _id: { $in: refIds(field) } }] }).lean();
 
   const results = await Promise.all([
-    ...GRAPH_SOURCES.map(([, key, extra = {}]) => models[key].find({ ...live(allIds), ...extra }).lean()),
+    // transfers are listed on the source job and on the job that received the fabric
+    ...GRAPH_SOURCES.map(([, key, extra = {}]) => models[key].find(key === 'fabricTransfer'
+      ? { isDeleted: false, ...extra, $or: [{ job: { $in: allIds } }, { toJob: { $in: allIds } }] }
+      : { ...live(allIds), ...extra }).lean()),
     DocumentFile.find({ job: { $in: allIds }, isDeleted: false }).lean(),
     commercial('enquiry', 'enquiry'), commercial('costing', 'costing'), commercial('quotation', 'quotation'),
   ]);
@@ -53,7 +57,7 @@ export async function loadJobGraphs(jobs) {
     const pick = (rows) => rows.filter((r) => mine.has(String(r.job)));
     const pickCommercial = (rows, field) => rows.filter((r) => mine.has(String(r.job)) || (job[field] && String(r._id) === String(job[field])));
     const g = { job, subJobs: subJobs.filter((s) => String(s.parentJob) === String(job._id)), ids };
-    GRAPH_SOURCES.forEach(([name], i) => { g[name] = pick(results[i]); });
+    GRAPH_SOURCES.forEach(([name], i) => { g[name] = name === 'transfers' ? results[i].filter((r) => mine.has(String(r.job)) || mine.has(String(r.toJob))) : pick(results[i]); });
     return Object.assign(g, {
       docs: pick(docs),
       enquiries: pickCommercial(enquiries, 'enquiry'),
@@ -187,9 +191,11 @@ export async function computeStages(g) {
   // Fabric
   const approvedIdx = FABRIC_FLOW.indexOf('Approved');
   const fabDone = (f) => f.status === 'Fabric Job Closed' || FABRIC_FLOW.indexOf(f.status) >= approvedIdx;
-  st.fabric = !g.fabric.length ? P : g.fabric.every(fabDone) ? D
+  const forecastDone = (f) => ['Received', 'Allocated', 'Closed'].includes(f.status) || (num(f.forecastQty) > 0 && num(f.receivedQty) >= num(f.forecastQty));
+  st.fabric = !g.fabric.length ? (!g.forecasts.length ? P : g.forecasts.every(forecastDone) ? D : A) : g.fabric.every(fabDone) ? D
     : g.fabric.some((f) => num(f.shortageQty) > 0 && f.deliveryDate && new Date(f.deliveryDate) < today()) ? L : A;
-  meta.fabric = { required: round(sum(g.fabric, 'requiredQty'), 2), received: round(sum(g.fabric, 'receivedQty'), 2), shortage: round(sum(g.fabric, 'shortageQty'), 2) };
+  meta.fabric = { required: round(sum(g.fabric, 'requiredQty'), 2), received: round(sum(g.fabric, 'receivedQty'), 2), shortage: round(sum(g.fabric, 'shortageQty'), 2),
+    forecast: round(sum(g.forecasts, 'forecastQty'), 2), forecastReceived: round(sum(g.forecasts, 'receivedQty'), 2), transferred: round(sum(g.forecasts, 'transferredQty'), 2), forecastBalance: round(sum(g.forecasts, 'balanceQty'), 2) };
 
   // Trims
   const trimDone = (t) => ['Received', 'Issued', 'Consumed', 'Closed'].includes(t.status) && num(t.shortageQty) <= 0;
@@ -272,6 +278,10 @@ export async function computeStages(g) {
 
   // Closure readiness
   const blockers = [];
+  // fabric transfers still in progress and forecasts not closed (main and sub jobs alike)
+  const openTransfers = g.transfers.filter((t) => ['Requested', 'Approved'].includes(t.status));
+  if (openTransfers.length) blockers.push(`${openTransfers.length} fabric transfer(s) not completed`);
+  g.forecasts.filter((f) => !['Closed', 'Cancelled'].includes(f.status)).forEach((f) => blockers.push(`Fabric forecast ${f.refNo} not closed (balance ${round(num(f.balanceQty), 2)} ${f.unit})`));
   if (isMain) {
     g.subJobs.filter((s) => s.status !== 'Closed').forEach((s) => blockers.push(`Sub job ${s.jobNo} is not closed`));
   } else {

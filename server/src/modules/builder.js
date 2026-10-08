@@ -52,6 +52,8 @@ const EXTENSIONS = {
   quotation: { quoteGroup: { type: String, index: true }, supersededBy: { type: ObjectId, ref: 'Quotation' } },
   fabricBooking: { closedAt: Date, closedBy: { type: ObjectId, ref: 'User' }, readyToClose: Boolean, fromBom: Boolean },
   trimBooking: { fromBom: Boolean },
+  // where a completed transfer went (the destination may be in the other unit)
+  fabricTransfer: { toJob: { type: ObjectId, ref: 'Job', index: true }, toBooking: { type: ObjectId, ref: 'FabricBooking' }, completedAt: Date },
 };
 
 export function buildSchema(def) {
