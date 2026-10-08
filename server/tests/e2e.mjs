@@ -16,6 +16,7 @@ const call = async (method, path, body, expect = [200, 201]) => {
   if (!expect.includes(res.status)) { console.error('FAIL', method, path, res.status, JSON.stringify(data)); process.exit(1); }
   return data;
 };
+const r2 = (v) => Math.round(v * 100) / 100;
 const ok = (cond, msg) => { if (!cond) { console.error('ASSERT FAIL:', msg); process.exit(1); } console.log('  ✓', msg); };
 
 let r = await call('POST', '/auth/login', { email: 'ashofficial338@gmail.com', password: 'Admin@12345' });
@@ -289,5 +290,86 @@ const au = await call('GET', '/admin/audit?unit=ALL&action=UNIT_SWITCH');
 ok(au.total >= 1, 'unit switches are audited');
 const u1Audit = await call('GET', `/admin/audit?jobNo=${u2a.jobNo}`);
 ok(u1Audit.total === 0, 'Unit-1 audit view does not show Unit-2 history');
+
+
+// ---------- Management analytics: Revenue → COGS → EBITDA → Net, inventory → ITR → holding days, ROI ----------
+// Deterministic Unit-2 job, values worked out by hand:
+//   1,000 pcs × 10.00 = revenue 10,000 · fabric 200 kg × 5 = 1,000 · polybags 1,000 × 0.10 = 100 · sewing 2,000 · freight 300
+//   COGS / pc = (1,000 + 100 + 2,000) / 1,000 = 3.10 → COGS 3,100 · opex = freight 300 + admin 400 = 700
+//   EBITDA = 10,000 − 3,100 − 700 = 6,200 · Net = 6,200 − interest 100 − tax 200 − depreciation 150 − amortization 50 = 5,700
+//   ROI = (10,000 − 3,400) ÷ 3,400 = 194.12 % · closing inventory = 50 kg fabric × 5 = 250 → ITR = 3,100 ÷ 125 = 24.8
+{ // block scope keeps these names apart from the lifecycle test above
+r = await call('POST', '/auth/select-unit', { unit: 'U2' }); token = r.accessToken;
+const aj = await call('POST', '/jobs', { buyer: buyer._id, poNo: 'AN-PO-1', styleNo: 'AN-ST-1', product: 'Polo Shirt', orderDate: '2026-01-05', orderQty: 1000, unitPrice: 10, shipmentDate: '2026-03-31', consumption: 0.2, consumptionUnit: 'KG', fabricType: 'Jersey', fabricRate: 5, sizeBreakdown: [{ color: 'Red', size: 'M', qty: 600 }, { color: 'Blue', size: 'M', qty: 400 }], trims: [{ item: 'Polybag', consumptionPerPc: 1, unit: 'Pcs', wastagePct: 0, rate: 0.1 }] });
+const at = await call('GET', `/jobs/track/${aj.jobNo}`);
+const afb = at.records.fabricBooking[0]; const atb = at.records.trimBooking[0];
+await call('PUT', `/m/fabricBooking/${afb._id}`, { bookedQty: 200, receivedQty: 200, inspectedQty: 200, approvedQty: 200 });
+await call('PUT', `/m/fabricBooking/${afb._id}`, { issuedQty: 150 });
+await call('PUT', `/m/trimBooking/${atb._id}`, { bookedQty: 1000, receivedQty: 1000, issuedQty: 1000 });
+await call('POST', '/m/cutting', { job: aj.jobNo, entryDate: '2026-02-01', manualCutQty: 1000 });
+await call('POST', '/m/sewing', { job: aj.jobNo, entryDate: '2026-02-05', line: 'L9', operators: 10, sam: 5, workingMinutes: 480, manualOutput: 1000, rejection: 4 });
+await call('POST', '/m/finishing', { job: aj.jobNo, entryDate: '2026-02-10', inputQty: 1000, passedQty: 1000 });
+await call('POST', '/m/packing', { job: aj.jobNo, packingDate: '2026-02-12', rows: [{ cartonFrom: 1, cartonTo: 100, pcsPerCarton: 10 }] });
+const ash = await call('POST', '/m/shipment', { job: aj.jobNo, invoiceNo: 'AN-INV-1', shipmentDate: '2026-02-20', actualShipDate: '2026-02-20' });
+for (const st of ['Booked', 'Stuffed', 'Shipped']) await call('POST', `/m/shipment/${ash._id}/status`, { status: st });
+const ainv = await call('POST', '/m/invoice', { job: aj.jobNo, shipment: ash._id, invoiceDate: '2026-02-25', dueDate: '2026-03-25' });
+await call('POST', `/m/invoice/${ainv._id}/status`, { status: 'Issued' });
+await call('POST', '/m/expense', { job: aj.jobNo, category: 'Sewing / CMT', expenseDate: '2026-02-05', amount: 2000 });
+await call('POST', '/m/expense', { job: aj.jobNo, category: 'Freight', expenseDate: '2026-02-21', amount: 300 });
+for (const [category, amount] of [['Admin Expense', 400], ['Interest', 100], ['Tax', 200], ['Depreciation', 150], ['Amortization', 50]]) {
+  await call('POST', '/m/expense', { category, expenseDate: '2026-03-01', amount, description: `Company ${category}` });
+}
+ok(true, 'company-level expenses (no Job No) accepted for interest, tax, depreciation, amortization, admin');
+const today = new Date().toISOString().slice(0, 10);
+const P = `from=2026-01-01&to=${today}`;
+const days = Math.round((Date.parse(`${today}T23:59:59.999Z`) + 1 - Date.parse('2026-01-01T00:00:00Z')) / 86400000);
+const fin = await call('GET', `/analytics/finance?${P}`);
+ok(fin.revenue === 10000 && fin.cogs === 3100 && fin.operatingExpenses === 700, `revenue ${fin.revenue}, COGS ${fin.cogs}, operating expenses ${fin.operatingExpenses}`);
+ok(fin.ebitda === 6200 && fin.netProfit === 5700 && fin.ebitdaCheck === fin.ebitda, `EBITDA ${fin.ebitda} = net ${fin.netProfit} + I ${fin.interest} + T ${fin.taxes} + D ${fin.depreciation} + A ${fin.amortization}`);
+ok(fin.sources.sales[0].jobNo === aj.jobNo && fin.sources.absorbed.length === 1 && fin.sources.interest[0].amount === 100, 'finance drill-down lists invoices (with Job No), absorbed job costs and finance lines');
+const inv = await call('GET', `/analytics/inventory?${P}`);
+const fab = inv.categories.find((c) => c.category === 'Fabric');
+ok(inv.opening === 0 && inv.closing === 250 && inv.average === 125 && inv.itr === 24.8, `ITR ${inv.itr}x = COGS ${inv.cogs} ÷ avg inventory ${inv.average} (opening ${inv.opening}, closing ${inv.closing})`);
+ok(inv.holdingDays === Math.round(250 / (3100 / days)) && fab.consumption === 750 && fab.holdingDays === Math.round(250 / (750 / days)), `holding period ${inv.holdingDays} days overall, fabric ${fab.holdingDays} days (${days}-day period)`);
+const pkg = inv.categories.find((c) => c.category === 'Packing Materials');
+ok(pkg.closing === 0 && pkg.holdingDays === 0 && inv.categories.find((c) => c.category === 'Yarn & Grey Fabric').itr === null, 'zero inventory / zero consumption give 0 or "not computable" – never Infinity');
+ok(inv.closingDetail.materials.some((m) => m.refNo === afb.refNo && m.qty === 50) && inv.movements.some((m) => m.refNo === afb.refNo && m.direction === 'out' && m.qty === 150), 'stock ledger movements behind the figures (fabric issue 150 kg)');
+const rs = await call('GET', `/analytics/roi?${P}&by=style`);
+const st1 = rs.rows.find((x) => x.key === 'AN-ST-1');
+ok(st1 && st1.revenue === 10000 && st1.cost === 3400 && st1.profit === 6600 && st1.roiPct === 194.12 && st1.jobs[0].jobNo === aj.jobNo, `style ROI ${st1?.roiPct}% (profit 6,600 ÷ cost 3,400) → job ${st1?.jobs[0].jobNo}`);
+const rc = await call('GET', `/analytics/roi?${P}&by=color`);
+ok(rc.rows.find((x) => x.key === 'Red').revenue === 6000 && rc.rows.find((x) => x.key === 'Blue').profit === 2640, 'colour ROI allocates by the colour/size breakdown (Red 60 %, Blue 40 %)');
+const vr = await call('GET', `/analytics/variance?${P}`);
+const vj = vr.jobs.find((x) => x.jobNo === aj.jobNo);
+ok(vj.actualCost === 3400 && vj.rejectedQty === 4 && vj.rejectionLoss === 12.4 && vr.heads.find((h) => h.key === 'sewing').actual >= 2000, `cost variance by head; quality loss ${vj.rejectionLoss} (4 rejected × 3.10)`);
+const op = await call('GET', `/analytics/operations?${P}`);
+const oj = op.rows.find((x) => x.jobNo === aj.jobNo);
+ok(oj.fabric.received === 200 && oj.fabric.issued === 150 && oj.production.produced === 1000 && oj.production.efficiencyPct === 104.17 && oj.shipment.shipped === 1000 && oj.shipment.onTime === true && oj.shipment.value === 10000, 'fabric, production (eff 104.17 %) and shipment performance per job');
+const sm = await call('GET', `/analytics/summary?${P}`);
+ok(sm.finance.ebitda === 6200 && sm.inventory.itr === 24.8 && sm.roi.topStyle.key === 'AN-ST-1' && sm.currency === 'USD', 'dashboard summary returns the same figures in the base currency');
+// unit separation & consolidation
+const u1fin = await call('GET', `/analytics/finance?${P}&unit=U1`);
+const allfin = await call('GET', `/analytics/finance?${P}&unit=ALL`);
+ok(!u1fin.sources.sales.some((x) => x.jobNo === aj.jobNo) && allfin.revenue === r2(u1fin.revenue + fin.revenue), `unit-wise finance kept apart; consolidated revenue ${allfin.revenue} = U1 ${u1fin.revenue} + U2 ${fin.revenue}`);
+// change the data → KPIs move
+await call('PUT', `/m/fabricBooking/${afb._id}`, { issuedQty: 200 });
+ok((await call('GET', `/analytics/inventory?${P}`)).closing === 0, 'issuing the remaining fabric recalculates closing inventory to 0');
+// permissions: non-admin needs an explicit grant
+token = u1Token;
+const fabUser = (await call('GET', '/admin/users?q=fabric@test.com')).rows[0];
+const adminTok = token;
+token = ''; cookie = '';
+r = await call('POST', '/auth/login', { email: 'fabric@test.com', password: 'Fabric@1234' }); token = r.accessToken;
+r = await call('POST', '/auth/select-unit', { unit: 'U1' }); token = r.accessToken;
+await call('GET', `/analytics/summary?${P}`, null, [403]);
+ok(true, 'non-admin user without the analytics permission is refused');
+const fabTok = token; token = adminTok;
+await call('PUT', `/admin/users/${fabUser._id}`, { permissions: { analytics: ['view'] } });
+token = fabTok;
+ok((await call('GET', `/analytics/summary?${P}`)).scope === 'U1', 'explicit analytics grant opens the drill-down (in the user\'s own unit)');
+await call('GET', `/analytics/summary?${P}&unit=U2`, null, [403]);
+ok(true, 'granted user still cannot read another unit');
+token = adminTok;
+}
 
 console.log('\nALL E2E CHECKS PASSED');

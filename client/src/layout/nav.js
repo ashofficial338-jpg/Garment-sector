@@ -45,10 +45,11 @@ export const NAV = [
     { to: '/documents', label: 'Buyer Documents', icon: 'FolderOpen', perm: ['documents'] },
     { to: '/m/invoice', label: 'Invoices / Accounts', icon: 'ReceiptText', perm: ['invoice'] },
     { to: '/m/payment', label: 'Payments', icon: 'Wallet', perm: ['payment'] },
-    { to: '/m/expense', label: 'Job Expenses', icon: 'Coins', perm: ['expense'] },
+    { to: '/m/expense', label: 'Expenses', icon: 'Coins', perm: ['expense'] },
     { to: '/profit', label: 'Profit Analysis', icon: 'TrendingUp', perm: ['profit'] },
   ] },
   { group: 'Insights', items: [
+    { to: '/analytics', label: 'Management Analytics', icon: 'ChartNoAxesCombined', perm: ['analytics'] },
     { to: '/reports', label: 'Report Center', icon: 'FileBarChart', perm: ['reports'] },
     { to: '/notifications', label: 'Notifications', icon: 'Bell' },
     { to: '/framework', label: 'Department Framework', icon: 'BookOpenCheck' },

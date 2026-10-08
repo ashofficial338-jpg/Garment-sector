@@ -4,12 +4,14 @@ import { useNavigate } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
 import { api, errMsg, download } from '../api.js';
 import { useFeedback } from '../components/Feedback.jsx';
+import { useAuth } from '../auth/AuthContext.jsx';
 import { PageHead, Card, Kpi, Loading, Icon, StatusBadge, Empty } from '../components/ui.jsx';
 import { ChartBox, ChartTooltip, ChartLegend, useChartTheme } from '../components/Charts.jsx';
 import { fmtNum, fmtCompact } from '../utils/format.js';
 
 export default function Profit() {
   const { toast } = useFeedback();
+  const { can } = useAuth();
   const nav = useNavigate();
   const t = useChartTheme();
   const [rows, setRows] = useState(null);
@@ -24,6 +26,7 @@ export default function Profit() {
   return (
     <div>
       <PageHead title="Profit Analysis" icon="TrendingUp" subtitle="Order value − fabric − trims − production − labour − overhead − freight − other = actual profit">
+        {can('analytics', 'view') && <button className="btn" onClick={() => nav('/analytics?tab=variance')}><Icon name="ChartNoAxesCombined" size={15} /> Cost variance & ROI</button>}
         <button className="btn" onClick={() => download('/reports/profit', { format: 'xlsx' })}><Icon name="FileSpreadsheet" size={15} /> Excel</button>
       </PageHead>
       <div className="kpis">
@@ -51,16 +54,17 @@ export default function Profit() {
         {!rows.length ? <Empty title="No jobs" /> : (
           <div className="table-wrap">
             <table className="tbl">
-              <thead><tr><th>Job</th><th>Buyer / Style</th><th className="num">Shipped</th><th className="num">Revenue</th><th className="num">Expenses</th><th className="num">Expected</th><th className="num">Actual</th><th className="num">Variance</th><th className="num">Profit %</th><th>Status</th></tr></thead>
+              <thead><tr><th>Job</th><th>Buyer / Style</th><th>PO</th><th className="num">Order qty</th><th className="num">Shipped</th><th className="num">Revenue</th><th className="num">Est. cost</th><th className="num">Actual cost</th><th className="num">Expected</th><th className="num">Actual</th><th className="num">Variance</th><th className="num">Profit %</th><th className="num">ROI</th><th>Status</th></tr></thead>
               <tbody>{rows.map((r) => (
                 <tr key={r._id} className="click" onClick={() => nav(`/jobs/${r.jobNo}`)}>
                   <td className="mono link">{r.jobNo}</td><td>{r.buyerName}<div className="muted small">{r.styleNo}</div></td>
-                  <td className="num">{fmtNum(r.shippedQty)}</td><td className="num">{fmtNum(r.revenue, 2)}</td><td className="num">{fmtNum(r.totalExpenses, 2)}</td>
+                  <td>{r.poNo}</td><td className="num">{fmtNum(r.orderQty)}</td>
+                  <td className="num">{fmtNum(r.shippedQty)}</td><td className="num">{fmtNum(r.revenue, 2)}</td><td className="num">{fmtNum(r.expectedCost, 2)}</td><td className="num">{fmtNum(r.totalExpenses, 2)}</td>
                   <td className="num">{fmtNum(r.expectedProfit, 2)}</td>
                   {r.revenue > 0 ? <>
                     <td className="num" style={{ color: r.actualProfit >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 650 }}>{fmtNum(r.actualProfit, 2)}</td>
-                    <td className="num">{fmtNum(r.profitVariance, 2)}</td><td className="num">{r.profitPct}%</td>
-                  </> : <td className="muted small" colSpan={3}>Not invoiced yet – costs to date {fmtNum(r.totalExpenses, 0)}</td>}<td><StatusBadge status={r.status} /></td>
+                    <td className="num">{fmtNum(r.profitVariance, 2)}</td><td className="num">{r.profitPct}%</td><td className="num">{r.roiPct}%</td>
+                  </> : <td className="muted small" colSpan={4}>Not invoiced yet – costs to date {fmtNum(r.totalExpenses, 0)}</td>}<td><StatusBadge status={r.status} /></td>
                 </tr>
               ))}</tbody>
             </table>

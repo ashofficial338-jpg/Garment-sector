@@ -13,6 +13,14 @@ export const fmtMoney = (v, cur = 'USD', d = 2) => {
   if (!Number.isFinite(n)) return '—';
   return `${cur ? `${cur} ` : ''}${fmtNum(n, d)}`;
 };
+/** Amount in the ERP base currency with its symbol (₹, $, €…); compact = 1.2M style. */
+export const fmtCurrency = (v, cur = 'USD', compact = false) => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  try {
+    return Intl.NumberFormat(cur === 'INR' ? 'en-IN' : 'en-US', { style: 'currency', currency: cur, notation: compact ? 'compact' : 'standard', maximumFractionDigits: compact ? 1 : 2 }).format(n);
+  } catch { return fmtMoney(n, cur); }
+};
 export const fmtCompact = (v) => {
   const n = Number(v) || 0;
   return Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(n);

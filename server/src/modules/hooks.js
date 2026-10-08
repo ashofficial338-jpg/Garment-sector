@@ -18,6 +18,7 @@ import { bomConsumptionFor, materialPerPcFromCosting } from '../../../shared/mod
 import { yarnAvailable, stageAvailable } from '../services/stock.js';
 import { completeTna, syncPpReadiness, PATTERN_DONE } from '../services/preproduction.js';
 import { createBookingsFromBom } from '../services/orderFlow.js';
+import { syncLedger } from '../services/stockLedger.js';
 
 /** True when a save / status change moved the record into `status` (not already there). */
 const reached = (ctx, status) => ctx.saved?.status === status && ctx.existing?.status !== status;
@@ -193,6 +194,7 @@ export const hooks = {
 
   /* ---------------- Materials ---------------- */
   fabricBooking: {
+    async afterDelete(rec) { await syncLedger('fabricBooking', rec); },
     async beforeSave(ctx) {
       const d = ctx.data;
       guard(ctx, num(d.approvedQty) <= num(d.inspectedQty) || !num(d.inspectedQty), 'Approved quantity cannot exceed inspected quantity');
@@ -203,6 +205,7 @@ export const hooks = {
     },
     async afterSave(ctx) {
       const d = ctx.saved;
+      await syncLedger('fabricBooking', d); // dated receipt / issue movements for inventory valuation
       const settings = await getSetting('notifications');
       if (settings.fabricShortage && num(d.shortageQty) > 0 && num(d.receivedQty) > 0) {
         await notify({
@@ -224,6 +227,7 @@ export const hooks = {
     },
   },
   trimBooking: {
+    async afterDelete(rec) { await syncLedger('trimBooking', rec); },
     async beforeSave(ctx) {
       const d = ctx.data;
       guard(ctx, num(d.issuedQty) <= num(d.receivedQty), 'Issued trim quantity exceeds received quantity');
@@ -231,6 +235,7 @@ export const hooks = {
     },
     async afterSave(ctx) {
       const d = ctx.saved;
+      await syncLedger('trimBooking', d);
       const s = await getSetting('notifications');
       if (s.trimShortage && num(d.shortageQty) > 0 && num(d.receivedQty) > 0) {
         await notify({

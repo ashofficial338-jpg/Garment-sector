@@ -22,6 +22,7 @@ const Notifications = lazy(() => import('./pages/Notifications.jsx'));
 const Framework = lazy(() => import('./pages/Framework.jsx'));
 const Masters = lazy(() => import('./pages/Masters.jsx'));
 const Profit = lazy(() => import('./pages/Profit.jsx'));
+const Analytics = lazy(() => import('./pages/Analytics.jsx'));
 const StockReports = lazy(() => import('./pages/StockReports.jsx'));
 
 export default function App() {
@@ -45,6 +46,7 @@ export default function App() {
           <Route path="documents" element={<Documents />} />
           <Route path="reports" element={<Reports />} />
           <Route path="profit" element={<Profit />} />
+          <Route path="analytics" element={<Analytics />} />
           <Route path="stock" element={<StockReports />} />
           <Route path="notifications" element={<Notifications />} />
           <Route path="framework" element={<Framework />} />

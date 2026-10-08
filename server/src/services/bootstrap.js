@@ -11,6 +11,7 @@ import { MODULE_LIST } from '../../../shared/modules/index.js';
 import { Notification } from '../models/Notification.js';
 import { AuditLog } from '../models/AuditLog.js';
 import { DocumentFile } from '../models/Document.js';
+import { backfillLedger } from './stockLedger.js';
 import { PAYMENT_TERMS, INCOTERMS, TRIM_ITEMS } from '../../../shared/modules/commercial.js';
 
 export async function ensureRoles() {
@@ -87,6 +88,8 @@ export async function ensureUnits() {
 export async function bootstrap() {
   await ensureRoles();
   await ensureUnits();
+  const posted = await backfillLedger();
+  if (posted) logger.info(`Stock ledger: ${posted} opening movements posted from existing bookings`);
   await ensureAdmin();
   await ensureMasters();
 }

@@ -1,6 +1,7 @@
 import { text, area, n, calc, date, sel, ref, bool, flow } from './dsl.js';
 import { CURRENCIES } from '../constants.js';
 import { num, round } from '../calc.js';
+import { EXPENSE_CATEGORIES } from '../costHeads.js';
 
 /* ------------------------------ Shipment ------------------------------ */
 export const shipment = {
@@ -76,10 +77,12 @@ export const payment = {
 };
 
 /* ------------------------------ Expenses ------------------------------ */
-export const EXPENSE_CATEGORIES = ['Fabric', 'Trims', 'Production', 'Labour', 'Overhead', 'Freight', 'Testing', 'Commission', 'Washing', 'Printing', 'Embroidery', 'Other'];
+// job cost heads + company-level finance lines (interest, tax, depreciation, amortization) – see shared/costHeads.js
+export { EXPENSE_CATEGORIES };
 export const expense = {
-  key: 'expense', model: 'Expense', title: 'Job Expenses', singular: 'Expense', group: 'Shipping & Finance', icon: 'Coins',
-  department: 'Accounts & Finance', prefix: 'EXP', jobLinked: true,
+  key: 'expense', model: 'Expense', title: 'Expenses', singular: 'Expense', group: 'Shipping & Finance', icon: 'Coins',
+  // job costs are booked against a Job No; company-level costs (interest, tax, depreciation…) have no job
+  department: 'Accounts & Finance', prefix: 'EXP', jobLinked: 'optional',
   ...flow(['Pending', 'Approved'], { Pending: ['Rejected'] }), defaultStatus: 'Pending',
   fields: [
     sel('category', 'Category', EXPENSE_CATEGORIES, { required: true, list: true, filter: true }),

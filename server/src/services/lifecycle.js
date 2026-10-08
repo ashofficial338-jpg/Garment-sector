@@ -11,6 +11,7 @@ import { getSetting } from './settings.js';
 import { notify } from './notify.js';
 import { FABRIC_FLOW } from '../../../shared/modules/planning.js';
 import { PATTERN_FLOW } from '../../../shared/modules/preproduction.js';
+import { COST_HEADS, COST_BUCKETS, financeLineOf } from '../../../shared/costHeads.js';
 import { num, sum, round, profitAnalysis } from '../../../shared/calc.js';
 
 const D = 'done', A = 'active', L = 'delayed', P = 'pending', NA = 'na';
@@ -66,54 +67,70 @@ export async function loadJobGraph(job) {
   return (await loadJobGraphs([job]))[0];
 }
 
-/** Actual vs expected profit for a job graph. */
+/**
+ * Actual vs expected profit for a job graph, by garment cost head (see shared/costHeads.js).
+ * Actual cost = booked fabric / trims + job expenses per head. Where a whole summary bucket has no actual
+ * cost booked yet, the costed (standard) value for the produced quantity is used so profit is never overstated.
+ * Also returns COGS (cost of goods, excl. freight & commercial costs), ROI and cost per piece.
+ */
 export function computeProfit(g) {
   const { job } = g;
   const shippedQty = sum(g.shipments.filter((s) => ['Shipped', 'Delivered'].includes(s.status)), 'qty');
   const invoiced = sum(g.invoices, 'totalAmount');
   const revenue = invoiced || shippedQty * num(job.unitPrice);
-  const byCat = (cats) => sum(g.expenses.filter((e) => cats.includes(e.category)), 'amount');
-  const fabricActual = sum(g.fabric, 'actualValue') + byCat(['Fabric']);
-  const trimActual = sum(g.trims, 'actualAmount') + byCat(['Trims']);
   const costing = g.costings.find((c) => c.status === 'Approved') || g.costings[0];
+  const c = costing || {};
   const qty = num(job.orderQty);
   const expectedProfit = costing ? num(costing.profitPerPc) * qty : num(job.expectedProfit);
   const expectedCost = costing ? num(costing.totalCostPerPc) * qty : num(job.expectedCost);
-
-  // Where no actual expense is booked for a cost head, fall back to the costed (standard) value
-  // for the produced quantity so actual profit is never overstated.
   const producedQty = shippedQty || sum(g.packing, 'totalQty') || 0;
-  const std = (perPc) => (costing ? perPc * producedQty : 0);
-  const basis = {};
-  const head = (key, actual, standardPerPc) => {
-    if (actual > 0 || !costing || !producedQty) { basis[key] = 'actual'; return actual; }
-    basis[key] = standardPerPc > 0 ? 'standard' : 'actual';
-    return std(standardPerPc);
-  };
-  const c = costing || {};
+
+  // actual per head: booked materials + job expenses of the head's categories
+  const jobCosts = g.expenses.filter((e) => !financeLineOf(e.category));
+  const actualOf = (h) => sum(jobCosts.filter((e) => h.expense.includes(e.category)), 'amount')
+    + (h.key === 'fabric' ? sum(g.fabric, 'actualValue') : 0)
+    + (h.key === 'trims' ? sum(g.trims, 'actualAmount') : 0);
+  const perPc = (h) => h.costing.reduce((t, k) => t + num(c[k]), 0);
+  const raw = COST_HEADS.map((h) => ({ h, actual: actualOf(h), perPc: perPc(h) }));
+  const bucketHasActual = Object.fromEntries(COST_BUCKETS.map((b) => [b, raw.some((x) => x.h.bucket === b && x.actual > 0)]));
+  const heads = raw.map(({ h, actual, perPc: pp }) => {
+    const useStandard = !bucketHasActual[h.bucket] && costing && producedQty > 0 && pp > 0;
+    return {
+      key: h.key, label: h.label, bucket: h.bucket, cogs: h.cogs,
+      estimated: round(pp * qty), estimatedPerPc: round(pp, 4),
+      actual: round(useStandard ? pp * producedQty : actual),
+      basis: useStandard ? 'standard' : 'actual',
+    };
+  }).map((x) => ({ ...x, variance: round(x.actual - x.estimated) }));
+  const bucketSum = (b) => sum(heads.filter((x) => x.bucket === b), 'actual');
+  const basis = Object.fromEntries(COST_BUCKETS.map((b) => {
+    const hs = heads.filter((x) => x.bucket === b);
+    return [b, hs.some((x) => x.basis === 'standard') ? 'standard' : 'actual'];
+  }));
+
   const pa = profitAnalysis({
     revenue,
-    fabricCost: head('fabric', fabricActual, num(c.fabricCost)),
-    trimCost: head('trims', trimActual, num(c.trimCost) + num(c.accessoriesCost)),
-    productionCost: head('production', byCat(['Production', 'Washing', 'Printing', 'Embroidery']),
-      num(c.cuttingCost) + num(c.sewingCost) + num(c.finishingCost) + num(c.packingCost) + num(c.washingCost) + num(c.printingCost) + num(c.embroideryCost) + num(c.dyeingCost)),
-    labourCost: head('labour', byCat(['Labour']), num(c.labourCost)),
-    overheadCost: head('overhead', byCat(['Overhead', 'Commission']), num(c.factoryOverhead) + num(c.adminOverheadAmt) + num(c.commissionAmt) + num(c.financeAmt)),
-    freightCost: head('freight', byCat(['Freight']), num(c.freightCost)),
-    otherCost: head('other', byCat(['Testing', 'Other']), num(c.testingCost) + num(c.inspectionCost) + num(c.otherExpenses)),
-    expectedProfit,
-    expectedCost,
-    expectedRevenue: qty * num(job.unitPrice),
+    fabricCost: bucketSum('fabric'), trimCost: bucketSum('trims'), productionCost: bucketSum('production'),
+    labourCost: bucketSum('labour'), overheadCost: bucketSum('overhead'), freightCost: bucketSum('freight'), otherCost: bucketSum('other'),
+    expectedProfit, expectedCost, expectedRevenue: qty * num(job.unitPrice),
   });
+  const cogs = round(sum(heads.filter((x) => x.cogs), 'actual'));
+  const costQty = producedQty || qty;
   const received = sum(g.payments, 'amount');
   return {
     ...pa,
     orderValue: round(qty * num(job.unitPrice)),
     expectedRevenue: round(qty * num(job.unitPrice)),
+    expectedCost: round(expectedCost),
     invoiced: round(invoiced), received: round(received), outstanding: round(invoiced - received),
-    shippedQty, currency: job.currency,
+    shippedQty, producedQty, currency: job.currency,
     costingRef: costing?.refNo,
     costBasis: basis,
+    heads,
+    cogs,
+    cogsPerPc: costQty ? round(cogs / costQty, 4) : 0,
+    estimatedCogsPerPc: round(sum(heads.filter((x) => x.cogs), 'estimatedPerPc'), 4),
+    roiPct: pa.totalExpenses ? round((pa.actualProfit / pa.totalExpenses) * 100, 2) : 0,
   };
 }
 

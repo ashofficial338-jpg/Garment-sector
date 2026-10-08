@@ -92,4 +92,5 @@ export const SYSTEM_PERMISSION_MODULES = [
   { key: 'audit', title: 'Audit Trail' },
   { key: 'profit', title: 'Profit Analysis' },
   { key: 'stock', title: 'Stock Reports' },
+  { key: 'analytics', title: 'Management Analytics (ROI, ITR, EBITDA, drill-down)' },
 ];

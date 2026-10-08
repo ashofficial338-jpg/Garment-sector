@@ -7,7 +7,7 @@ import { UnitScope, useUnitName } from '../components/UnitScope.jsx';
 import { useFeedback } from '../components/Feedback.jsx';
 import { Kpi, Card, Icon, Loading, StatusBadge, Progress, Badge, Empty } from '../components/ui.jsx';
 import { ChartBox, ChartTooltip, ChartLegend, useChartTheme } from '../components/Charts.jsx';
-import { fmtCompact, fmtDate, fmtNum, STAGE_LABEL } from '../utils/format.js';
+import { fmtCompact, fmtCurrency, fmtDate, fmtNum, STAGE_LABEL } from '../utils/format.js';
 
 /** Which KPI sections each department dashboard shows */
 export const DASHBOARDS = {
@@ -25,7 +25,46 @@ export const DASHBOARDS = {
 
 const money = (v) => `$${fmtCompact(v)}`;
 
-function KpiSection({ name, k }) {
+/** KPI sections without their own link drill into the matching analytics view (analytics permission only). */
+const SECTION_DRILL = { merchandising: 'variance', fabric: 'operations', production: 'operations', quality: 'variance', shipment: 'operations', accounts: 'finance', finance: 'finance' };
+
+/**
+ * Management KPIs (Revenue → COGS → EBITDA, ITR, holding period, ROI, cost variance) – calculated on the
+ * server for the selected unit; Admin, or users granted the analytics permission. Each card opens its analysis.
+ */
+function ManagementKpis({ scope, drill }) {
+  const [m, setM] = useState(null);
+  useEffect(() => { setM(null); api.get('/analytics/summary', { params: { unit: scope || undefined } }).then((r) => setM(r.data)).catch(() => setM(false)); }, [scope]);
+  if (m === false) return null;
+  if (!m) return <div className="mt"><div className="form-section-title"><Icon name="ChartNoAxesCombined" size={14} /> Management (last 12 months)</div><Loading /></div>;
+  const cur = (v) => fmtCurrency(v, m.currency, true);
+  const days = (v) => (v === null ? 'n/a' : `${fmtNum(v)} days`);
+  const f = m.finance; const i = m.inventory; const r = m.roi;
+  const items = [
+    ['Revenue', f.revenue, cur, 'Banknote', 'primary', 'finance', 'issued invoices'],
+    ['COGS', f.cogs, cur, 'Factory', 'amber', 'finance', 'cost of goods sold'],
+    ['EBITDA', f.ebitda, cur, 'Landmark', 'green', 'finance', `${f.ebitdaMarginPct}% of revenue`],
+    ['Net Profit', f.netProfit, cur, 'BadgeDollarSign', 'blue', 'finance', `${f.netMarginPct}% net margin`],
+    ['Inventory Turnover', i.itr === null ? 'n/a' : `${fmtNum(i.itr, 2)}x`, null, 'RefreshCw', 'accent', 'inventory', 'COGS ÷ avg inventory'],
+    ['Inventory Holding', days(i.holdingDays), null, 'Hourglass', 'violet', 'inventory', `fabric ${days(i.holdingDaysByType.fabric)} · FG ${days(i.holdingDaysByType.finishedGoods)}`],
+    ['Style ROI', r.roiPct === null ? 'n/a' : `${fmtNum(r.roiPct, 1)}%`, null, 'Percent', 'green', 'roi&by=style', r.topStyle ? `best ${r.topStyle.key} ${fmtNum(r.topStyle.roiPct, 1)}%` : 'no invoiced jobs'],
+    ['Product ROI', r.topProduct ? `${fmtNum(r.topProduct.roiPct, 1)}%` : 'n/a', null, 'Shirt', 'primary', 'roi&by=product', r.topProduct ? `best: ${r.topProduct.key}` : 'no invoiced jobs'],
+    ['Cost Variance', m.variance.variance, cur, 'Scale', m.variance.variance > 0 ? 'red' : 'green', 'variance', 'actual − estimated'],
+    ['Rejection Loss', m.variance.qualityLoss, cur, 'XCircle', 'red', 'variance', 'quality loss'],
+  ];
+  return (
+    <div className="mt">
+      <div className="form-section-title"><Icon name="ChartNoAxesCombined" size={14} /> Management · {m.period}</div>
+      <div className="kpis">
+        {items.map(([label, value, fmt, ic, tone, tab, sub], n) => (
+          <Kpi key={label} label={label} icon={ic} tone={tone} delay={n * 30} value={fmt ? Number(value) || 0 : value} format={fmt || undefined} sub={sub} onClick={drill(tab)} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function KpiSection({ name, k, drill }) {
   const nav = useNavigate();
   const S = {
     merchandising: ['Merchandising', 'ClipboardCheck', [
@@ -94,7 +133,7 @@ function KpiSection({ name, k }) {
         {items.map(([label, value, unit, ic, tone, dec, sub, link], i) => (
           <Kpi key={label} label={label} icon={ic} tone={tone} delay={i * 40} value={Number(value) || 0}
             format={(v) => (unit === '$' ? money(v) : `${fmtNum(v, dec)}${unit === '%' ? '%' : ''}`)}
-            sub={sub} onClick={link ? () => nav(link) : undefined} />
+            sub={sub} onClick={link ? () => nav(link) : drill?.(SECTION_DRILL[name])} />
         ))}
       </div>
     </div>
@@ -127,7 +166,7 @@ export function JobMiniTable({ rows, empty }) {
 }
 
 export default function Dashboard({ focus }) {
-  const { user } = useAuth();
+  const { user, can } = useAuth();
   const unitName = useUnitName();
   const [scope, setScope] = useState('');
   const { toast } = useFeedback();
@@ -139,6 +178,10 @@ export default function Dashboard({ focus }) {
   useEffect(() => { setD(null); api.get('/dashboard', { params: { unit: scope || undefined } }).then((r) => setD(r.data)).catch((e) => toast(errMsg(e), 'err')); }, [scope]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!d) return <Loading />;
   const s = d.summary;
+  // Dashboard KPI → analytics page → source transactions (Admin, or the explicit analytics permission)
+  const deep = can('analytics', 'view');
+  const drill = (tab) => (deep && tab ? () => nav(`/analytics?tab=${tab}${scope ? `&unit=${scope}` : ''}`) : undefined);
+  const Analyse = ({ tab }) => (deep ? <button className="btn btn-sm btn-ghost" onClick={drill(tab)}><Icon name="ChartNoAxesCombined" size={14} /> Analyse</button> : null);
   const hour = new Date().getHours();
 
   return (
@@ -165,18 +208,18 @@ export default function Dashboard({ focus }) {
       {(!focus || focus === 'admin' || focus === 'merchandising') && (
         <div className="kpis mt">
           <Kpi label="Active Jobs" value={s.activeJobs} icon="Briefcase" tone="primary" onClick={() => nav('/m/orders')} sub={`${s.closedJobs} closed`} />
-          <Kpi label="Orders This Month" value={s.ordersThisMonth} icon="CalendarPlus" tone="accent" delay={30} />
+          <Kpi label="Orders This Month" value={s.ordersThisMonth} icon="CalendarPlus" tone="accent" delay={30} onClick={() => nav('/m/orders')} />
           <Kpi label="Pending Enquiries" value={s.pendingEnquiries} icon="MessageSquareText" tone="blue" delay={60} onClick={() => nav('/m/enquiry?status=Pending')} />
           <Kpi label="Pending Costing" value={s.pendingCosting} icon="Calculator" tone="violet" delay={90} onClick={() => nav('/m/costing')} />
           <Kpi label="Pending Approvals" value={s.pendingApprovals} icon="Stamp" tone="amber" delay={120} />
           <Kpi label="Fabric Pending" value={s.fabricPending} icon="Layers" tone="amber" delay={150} onClick={() => nav('/m/fabricBooking')} />
-          <Kpi label="Production Running" value={s.productionRunning} icon="Factory" tone="green" delay={180} />
-          <Kpi label="Delayed Jobs" value={s.delayedJobs} icon="AlarmClock" tone="red" delay={210} />
+          <Kpi label="Production Running" value={s.productionRunning} icon="Factory" tone="green" delay={180} onClick={drill('operations')} />
+          <Kpi label="Delayed Jobs" value={s.delayedJobs} icon="AlarmClock" tone="red" delay={210} onClick={drill('operations')} />
           <Kpi label="Shipment Due (14d)" value={s.shipmentDue} icon="Ship" tone="blue" delay={240} onClick={() => nav('/m/shipment')} />
           <Kpi label="Payment Pending" value={s.paymentPending} icon="Wallet" tone="amber" delay={270} onClick={() => nav('/m/invoice')} />
-          <Kpi label="Expected Revenue" value={s.expectedRevenue} format={money} icon="Banknote" tone="primary" delay={300} />
-          <Kpi label="Actual Revenue" value={s.actualRevenue} format={money} icon="BadgeDollarSign" tone="green" delay={330} />
-          <Kpi label="Expected Profit" value={s.expectedProfit} format={money} icon="Target" tone="blue" delay={360} />
+          <Kpi label="Expected Revenue" value={s.expectedRevenue} format={money} icon="Banknote" tone="primary" delay={300} onClick={drill('variance')} />
+          <Kpi label="Actual Revenue" value={s.actualRevenue} format={money} icon="BadgeDollarSign" tone="green" delay={330} onClick={drill('finance')} />
+          <Kpi label="Expected Profit" value={s.expectedProfit} format={money} icon="Target" tone="blue" delay={360} onClick={drill('variance')} />
           <Kpi label="Actual Profit" value={s.actualProfit} format={money} icon="TrendingUp" tone="green" delay={390} onClick={() => nav('/profit')} />
         </div>
       )}
@@ -194,11 +237,12 @@ export default function Dashboard({ focus }) {
         </Card>
       )}
 
-      {cfg.sections.map((sec) => <KpiSection key={sec} name={sec} k={d.kpis} />)}
+      {deep && <ManagementKpis scope={scope} drill={drill} />}
+      {cfg.sections.map((sec) => <KpiSection key={sec} name={sec} k={d.kpis} drill={drill} />)}
 
       <div className="grid g2 mt">
         {cfg.sections.some((x) => ['production', 'quality'].includes(x)) && (
-          <Card title="Production – target vs actual (last 14 days)" icon="BarChart3">
+          <Card title="Production – target vs actual (last 14 days)" icon="BarChart3" actions={<Analyse tab="operations" />}>
             <ChartBox>
               <BarChart data={d.charts.production} barGap={2}>
                 <CartesianGrid vertical={false} stroke={t.grid} />
@@ -212,7 +256,7 @@ export default function Dashboard({ focus }) {
           </Card>
         )}
         {cfg.sections.some((x) => ['production', 'quality'].includes(x)) && (
-          <Card title="Sewing efficiency % (last 14 days)" icon="Gauge">
+          <Card title="Sewing efficiency % (last 14 days)" icon="Gauge" actions={<Analyse tab="operations" />}>
             <ChartBox>
               <LineChart data={d.charts.production}>
                 <CartesianGrid vertical={false} stroke={t.grid} />
@@ -225,7 +269,7 @@ export default function Dashboard({ focus }) {
           </Card>
         )}
         {cfg.sections.some((x) => ['finance', 'accounts', 'merchandising'].includes(x)) && (
-          <Card title="Order value, invoiced & collected (12 months, USD)" icon="LineChart" className={cfg.sections.includes('production') ? '' : 'span2'}>
+          <Card title="Order value, invoiced & collected (12 months, USD)" icon="LineChart" className={cfg.sections.includes('production') ? '' : 'span2'} actions={<Analyse tab="finance" />}>
             <ChartBox>
               <BarChart data={d.charts.monthly} barGap={2}>
                 <CartesianGrid vertical={false} stroke={t.grid} />
@@ -240,7 +284,7 @@ export default function Dashboard({ focus }) {
           </Card>
         )}
         {cfg.sections.some((x) => ['merchandising', 'finance'].includes(x)) && (
-          <Card title="Top buyers by order value" icon="Building2">
+          <Card title="Top buyers by order value" icon="Building2" actions={<Analyse tab="roi&by=buyer" />}>
             <ChartBox>
               <BarChart data={d.charts.buyers} layout="vertical" margin={{ left: 10 }}>
                 <CartesianGrid horizontal={false} stroke={t.grid} />
@@ -253,7 +297,7 @@ export default function Dashboard({ focus }) {
           </Card>
         )}
         {cfg.sections.includes('production') && d.charts.lineEff.length > 0 && (
-          <Card title="Line-wise efficiency %" icon="Rows3">
+          <Card title="Line-wise efficiency %" icon="Rows3" actions={<Analyse tab="operations" />}>
             <ChartBox>
               <BarChart data={d.charts.lineEff}>
                 <CartesianGrid vertical={false} stroke={t.grid} />
@@ -266,7 +310,7 @@ export default function Dashboard({ focus }) {
           </Card>
         )}
         {(!focus || ['admin', 'merchandising'].includes(focus)) && (
-          <Card title="Active jobs by current stage" icon="Workflow">
+          <Card title="Active jobs by current stage" icon="Workflow" actions={<Analyse tab="operations" />}>
             <ChartBox>
               <BarChart data={d.charts.stageDist.map((x) => ({ ...x, label: STAGE_LABEL[x.stage] || x.stage }))}>
                 <CartesianGrid vertical={false} stroke={t.grid} />
