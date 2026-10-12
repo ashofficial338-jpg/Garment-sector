@@ -307,10 +307,10 @@ export function operations(ctx) {
       const finished = sum(g.finishing.filter(ok), 'passedQty'); const packed = sum(g.packing, 'totalQty');
       const planned = sum(g.plans, 'productionQty') || num(job.orderQty);
       const earned = sum(g.sewing.filter(ok), (s) => num(s.actualQty) * num(s.sam)); const avail = sum(g.sewing.filter(ok), (s) => num(s.operators) * num(s.workingMinutes));
-      const planEnd = g.plans.map((x) => x.plannedEnd).filter(Boolean).sort().pop();
+      const planEnd = g.plans.map((x) => x.plannedEnd).filter(Boolean).sort((a, b) => new Date(a) - new Date(b)).pop();
       const shipped = g.shipments.filter((s) => ['Shipped', 'Delivered'].includes(s.status));
       const shippedQty = sum(shipped, 'qty');
-      const lastShip = shipped.map((s) => s.actualShipDate || s.shipmentDate).filter(Boolean).sort().pop();
+      const lastShip = shipped.map((s) => s.actualShipDate || s.shipmentDate).filter(Boolean).sort((a, b) => new Date(a) - new Date(b)).pop();
       const shipDelay = job.shipmentDate ? Math.round(((lastShip ? new Date(lastShip) : (shippedQty < num(job.orderQty) ? today : new Date(job.shipmentDate))) - new Date(job.shipmentDate)) / DAY) : 0;
       const fabricHead = p.heads.find((h) => h.key === 'fabric');
       return {

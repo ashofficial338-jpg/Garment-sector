@@ -10,7 +10,11 @@ import { trimInventoryCategory } from '../../../shared/costHeads.js';
 import { num, round } from '../../../shared/calc.js';
 
 const SOURCES = {
-  fabricBooking: { category: () => 'Fabric', item: (r) => [r.fabricType, r.color].filter(Boolean).join(' · '), rate: (r) => num(r.rate), in: 'receivedQty', out: 'issuedQty' },
+  // net of fabric returns: back to the supplier leaves the store, back from cutting re-enters it
+  fabricBooking: {
+    category: () => 'Fabric', item: (r) => [r.fabricType, r.color].filter(Boolean).join(' · '), rate: (r) => num(r.rate), in: 'receivedQty', out: 'issuedQty',
+    qtyIn: (r) => num(r.receivedQty) - num(r.returnedToSupplierQty) + num(r.adjustedQty), qtyOut: (r) => num(r.issuedQty) - num(r.returnedFromCuttingQty),
+  },
   trimBooking: { category: (r) => trimInventoryCategory(r.item), item: (r) => [r.item, r.description].filter(Boolean).join(' · '), rate: (r) => num(r.rate), in: 'receivedQty', out: 'issuedQty' },
   // bulk forecast fabric: received against the forecast, out when transferred to a job / sub job
   fabricForecast: { category: () => 'Fabric', item: (r) => [r.fabricType, r.color, r.lotNo].filter(Boolean).join(' · '), rate: (r) => num(r.rate), in: 'receivedQty', out: 'transferredQty' },
@@ -27,7 +31,7 @@ export async function syncLedger(module, recOrId, { date, deleted = false } = {}
   const posted = await StockMovement.find({ recordId: rec._id, businessUnit: rec.businessUnit }).lean();
   const held = (dir) => posted.filter((m) => m.direction === dir).reduce((t, m) => t + num(m.qty), 0);
   const gone = deleted || rec.isDeleted;
-  const target = { in: gone ? 0 : num(rec[src.in]), out: gone ? 0 : num(rec[src.out]) };
+  const target = { in: gone ? 0 : src.qtyIn ? src.qtyIn(rec) : num(rec[src.in]), out: gone ? 0 : src.qtyOut ? src.qtyOut(rec) : num(rec[src.out]) };
   const out = [];
   for (const dir of ['in', 'out']) {
     const delta = round(target[dir] - held(dir), 4);

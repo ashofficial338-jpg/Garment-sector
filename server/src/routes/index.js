@@ -15,6 +15,7 @@ import lookupRoutes from './lookup.js';
 import quotationRoutes from './quotation.js';
 import stockRoutes from './stock.js';
 import analyticsRoutes from './analytics.js';
+import trackingRoutes from './tracking.js';
 import { PERMISSION_MODULES } from '../services/permissions.js';
 import { getSetting } from '../services/settings.js';
 
@@ -43,6 +44,7 @@ api.use('/lookup', lookupRoutes);
 api.use('/quotations', quotationRoutes);
 api.use('/stock', stockRoutes);
 api.use('/analytics', analyticsRoutes);
+api.use('/tracking', trackingRoutes);
 MODULE_LIST.forEach((def) => api.use(`/m/${def.key}`, crudRouter(def)));
 
 export default api;

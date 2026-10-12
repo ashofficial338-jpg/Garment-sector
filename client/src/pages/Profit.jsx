@@ -54,7 +54,7 @@ export default function Profit() {
         {!rows.length ? <Empty title="No jobs" /> : (
           <div className="table-wrap">
             <table className="tbl">
-              <thead><tr><th>Job</th><th>Buyer / Style</th><th>PO</th><th className="num">Order qty</th><th className="num">Shipped</th><th className="num">Revenue</th><th className="num">Est. cost</th><th className="num">Actual cost</th><th className="num">Expected</th><th className="num">Actual</th><th className="num">Variance</th><th className="num">Profit %</th><th className="num">ROI</th><th>Status</th></tr></thead>
+              <thead><tr><th>Job</th><th>Buyer / Style</th><th>PO</th><th className="num">Order qty</th><th className="num">Shipped</th><th className="num">Revenue</th><th className="num">Est. cost</th><th className="num">Actual cost</th><th className="num">Expected</th><th className="num">Actual</th><th className="num">Variance</th><th className="num">Profit %</th><th className="num">ROI</th><th className="num">Cost / pc</th><th className="num">Profit / pc</th><th>Status</th></tr></thead>
               <tbody>{rows.map((r) => (
                 <tr key={r._id} className="click" onClick={() => nav(`/jobs/${r.jobNo}`)}>
                   <td className="mono link">{r.jobNo}</td><td>{r.buyerName}<div className="muted small">{r.styleNo}</div></td>
@@ -63,8 +63,8 @@ export default function Profit() {
                   <td className="num">{fmtNum(r.expectedProfit, 2)}</td>
                   {r.revenue > 0 ? <>
                     <td className="num" style={{ color: r.actualProfit >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 650 }}>{fmtNum(r.actualProfit, 2)}</td>
-                    <td className="num">{fmtNum(r.profitVariance, 2)}</td><td className="num">{r.profitPct}%</td><td className="num">{r.roiPct}%</td>
-                  </> : <td className="muted small" colSpan={4}>Not invoiced yet – costs to date {fmtNum(r.totalExpenses, 0)}</td>}<td><StatusBadge status={r.status} /></td>
+                    <td className="num">{fmtNum(r.profitVariance, 2)}</td><td className="num">{r.profitPct}%</td><td className="num">{r.roiPct}%</td><td className="num">{fmtNum(r.costPerPc, 3)}</td><td className="num">{fmtNum(r.profitPerPc, 3)}</td>
+                  </> : <td className="muted small" colSpan={6}>Not invoiced yet – costs to date {fmtNum(r.totalExpenses, 0)}</td>}<td><StatusBadge status={r.status} /></td>
                 </tr>
               ))}</tbody>
             </table>

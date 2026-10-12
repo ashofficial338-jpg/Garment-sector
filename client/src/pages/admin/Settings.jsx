@@ -133,7 +133,7 @@ function UnitSeries({ ro, subJob }) {
                 <td><input disabled={ro} value={e.name ?? u.name} onChange={(x) => set(u.code, 'name', x.target.value)} style={{ minWidth: 140 }} /></td>
                 <td className="mono">{u.prefix}-####</td>
                 <td className="num">{u.start}</td>
-                <td><div className="row"><span className="mono muted">{u.prefix}-</span><input disabled={ro} type="number" min={u.nextJobNo} value={e.nextJobNo ?? u.nextJobNo} onChange={(x) => set(u.code, 'nextJobNo', x.target.value)} style={{ width: 110 }} /></div></td>
+                <td><div className="row"><span className="mono muted">{u.prefix}-</span><input disabled={ro} type="number" min={u.minNextJobNo ?? u.nextJobNo} title={`Lowest allowed: ${u.minNextJobNo ?? u.nextJobNo} (numbers already issued are never reused)`} value={e.nextJobNo ?? u.nextJobNo} onChange={(x) => set(u.code, 'nextJobNo', x.target.value)} style={{ width: 110 }} /></div></td>
                 <td className="num">{u.jobs}</td><td className="num">{u.openJobs}</td><td className="num">{u.users}</td>
                 {!ro && <td><button className="btn btn-sm btn-primary" disabled={!edit[u.code]} onClick={() => save(u)}><Icon name="Save" size={14} /> Save</button></td>}
               </tr>

@@ -15,11 +15,14 @@ import { getSetting } from '../services/settings.js';
 import { num, sum, round, efficiency } from '../../../shared/calc.js';
 import { applyCompute, MODULES } from '../../../shared/modules/index.js';
 import { bomConsumptionFor, materialPerPcFromCosting } from '../../../shared/modules/preproduction.js';
+import { BUYER_ORDER_DONE } from '../../../shared/modules/commercial.js';
+import { RETURN_TO_STORE, RETURN_TO_SUPPLIER, ADJUST_SHORT, ADJUST_EXCESS } from '../../../shared/modules/planning.js';
 import { yarnAvailable, stageAvailable } from '../services/stock.js';
 import { completeTna, syncPpReadiness, PATTERN_DONE } from '../services/preproduction.js';
 import { createBookingsFromBom } from '../services/orderFlow.js';
 import { syncLedger } from '../services/stockLedger.js';
 import { executeTransfer, resolveDestination } from '../services/fabricTransfer.js';
+import { rollTotals, rollStock, syncBookingFromRolls, syncForecastFromReceipts, syncBomFromBooking } from '../services/fabricRolls.js';
 
 /** True when a save / status change moved the record into `status` (not already there). */
 const reached = (ctx, status) => ctx.saved?.status === status && ctx.existing?.status !== status;
@@ -42,8 +45,39 @@ function guard(ctx, ok, message) {
   throw ApiError.badRequest(`${message}. Requires authorised override with reason.`, { code: 'OVERRIDE_REQUIRED' });
 }
 
+/** Booking or main-job forecast a fabric return / debit note is against (exactly one, of this job); stamps fabric and unit. */
+async function fabricSource(ctx) {
+  const d = ctx.data;
+  if (!!d.booking === !!d.forecast) throw ApiError.badRequest('Select either a fabric booking or a fabric forecast');
+  const src = d.booking ? await models.fabricBooking.findById(d.booking).lean() : await models.fabricForecast.findById(d.forecast).lean();
+  if (!src || src.isDeleted || String(src.job) !== String(ctx.job._id)) throw ApiError.badRequest('The booking / forecast belongs to a different job');
+  Object.assign(d, { fabric: [src.fabricType, src.color].filter(Boolean).join(' · '), unit: src.unit });
+  return src;
+}
+
+/** Forecast quantities are never shipped or invoiced: an advance job needs its actual buyer PO first. */
+function requirePo(job, what) {
+  if (job?.poStatus === 'Awaiting PO') throw ApiError.badRequest(`${job.jobNo} is an advance job awaiting the buyer PO – it cannot be ${what} until the actual PO is linked`);
+}
+
 export const hooks = {
   /* ---------------- Commercial ---------------- */
+  buyerOrder: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      if (ctx.existing?.jobNo) throw ApiError.badRequest(`Buyer PO is on job ${ctx.existing.jobNo} – change the order on the job (it is revision-tracked there)`);
+      const dup = await models.buyerOrder.exists({ _id: { $ne: ctx.existing?._id }, buyer: d.buyer, poNo: d.poNo, styleNo: d.styleNo, isDeleted: false, status: { $ne: 'Cancelled' } });
+      if (dup) throw ApiError.conflict(`Buyer PO ${d.poNo} / style ${d.styleNo} is already registered`);
+      if (d.quotation) {
+        const q = await models.quotation.findById(d.quotation).lean();
+        if (!q || String(q.buyer) !== String(d.buyer)) throw ApiError.badRequest('The quotation belongs to a different buyer');
+      }
+    },
+    async beforeStatus(ctx) {
+      if (BUYER_ORDER_DONE.includes(ctx.to)) throw ApiError.badRequest(`"${ctx.to}" is set by the Create Job / Link to Job actions`);
+      if (ctx.doc.jobNo) throw ApiError.badRequest(`Buyer PO is already on job ${ctx.doc.jobNo}`);
+    },
+  },
   quotation: {
     async beforeSave(ctx) {
       const d = ctx.data;
@@ -100,7 +134,8 @@ export const hooks = {
       if (!num(d.orderQty)) d.orderQty = ctx.job.orderQty;
       // booking links are system-maintained: keep them across edits, and never orphan a booking
       const prev = new Map((ctx.existing?.lines || []).map((l) => [String(l._id), l]));
-      d.lines = (d.lines || []).map((l) => ({ ...l, bookingRef: prev.get(String(l._id))?.bookingRef || null }));
+      const keep = (l, k) => prev.get(String(l._id))?.[k] ?? null;
+      d.lines = (d.lines || []).map((l) => ({ ...l, ...Object.fromEntries(['bookingRef', 'receivedQty', 'issuedQty', 'consumedQty', 'balanceQty'].map((k) => [k, keep(l, k)])) }));
       const kept = new Set(d.lines.map((l) => String(l._id)));
       const dropped = [...prev.values()].filter((l) => l.bookingRef && !kept.has(String(l._id)));
       guard(ctx, !dropped.length, `Line(s) ${dropped.map((l) => `${l.item} (${l.bookingRef})`).join(', ')} already have bookings – cancel the booking instead of deleting the line`);
@@ -233,20 +268,147 @@ export const hooks = {
     },
   },
 
+  /* ---------------- Fabric receipt (lot / roll / 4-point) and allocation (roll-wise issue) ---------------- */
+  fabricReceipt: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      if (!!d.booking === !!d.forecast) throw ApiError.badRequest('Select either a fabric booking or a fabric forecast');
+      const src = d.booking ? await models.fabricBooking.findById(d.booking).lean() : await models.fabricForecast.findById(d.forecast).lean();
+      if (!src || src.isDeleted || String(src.job) !== String(ctx.job._id)) throw ApiError.badRequest('The booking / forecast belongs to a different job');
+      Object.assign(d, { fabric: [src.fabricType, src.color].filter(Boolean).join(' · '), unit: src.unit });
+      const rolls = (d.rolls || []).filter((r) => r.rollNo || num(r.qty));
+      if (!rolls.length) throw ApiError.badRequest('Enter at least one roll');
+      if (rolls.some((r) => !r.rollNo || !(num(r.qty) > 0))) throw ApiError.badRequest('Every roll needs a roll no and a quantity');
+      const nos = rolls.map((r) => String(r.rollNo).trim());
+      const dupIn = nos.filter((x, i) => nos.indexOf(x) !== i);
+      if (dupIn.length) throw ApiError.badRequest(`Roll ${dupIn[0]} entered twice`);
+      const others = await models.fabricReceipt.find({ [d.booking ? 'booking' : 'forecast']: src._id, isDeleted: false, _id: { $ne: ctx.existing?._id } }).lean();
+      const taken = new Set(others.flatMap((o) => (o.rolls || []).map((r) => String(r.rollNo).trim())));
+      const dup = nos.find((x) => taken.has(x));
+      if (dup) throw ApiError.conflict(`Roll ${dup} is already received for this ${d.booking ? 'booking' : 'forecast'}`);
+      d.rolls = rolls;
+    },
+    async afterSave(ctx) {
+      const d = ctx.saved;
+      if (d.booking) await syncBookingFromRolls(d.booking, d.receiptDate); else await syncForecastFromReceipts(d.forecast, d.receiptDate);
+    },
+    async afterDelete(rec) { if (rec.booking) await syncBookingFromRolls(rec.booking); else await syncForecastFromReceipts(rec.forecast); },
+  },
+  fabricAllocation: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      const b = await models.fabricBooking.findById(d.booking).lean();
+      if (!b || b.isDeleted || String(b.job) !== String(ctx.job._id)) throw ApiError.badRequest('The fabric booking belongs to a different job');
+      Object.assign(d, { fabric: [b.fabricType, b.color].filter(Boolean).join(' · '), unit: b.unit });
+      const stock = await rollStock(b._id, ctx.existing?._id);
+      if (!stock.size) throw ApiError.badRequest(`No approved fabric receipt (passed rolls) for ${b.refNo} yet`);
+      const rolls = (d.rolls || []).filter((r) => r.rollNo || num(r.qty));
+      if (!rolls.length) throw ApiError.badRequest('Allocate at least one roll');
+      d.rolls = rolls.map((r) => {
+        const s = stock.get(String(r.rollNo).trim());
+        if (!s) throw ApiError.badRequest(`Roll ${r.rollNo} is not a passed roll of ${b.refNo}`);
+        guard(ctx, num(r.qty) > 0 && s.allocated + num(r.qty) <= s.qty + 0.0005, `Roll ${r.rollNo}: ${num(r.qty)} requested, ${round(s.qty - s.allocated, 3)} ${b.unit} left on the roll`);
+        return { ...r, lotNo: s.lotNo };
+      });
+    },
+    async afterSave(ctx) { await syncBookingFromRolls(ctx.saved.booking, ctx.saved.allocationDate); },
+    async afterDelete(rec) { await syncBookingFromRolls(rec.booking); },
+  },
+
+  /* ---------------- Fabric returns and debit notes (Fabric Department) ---------------- */
+  fabricReturn: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      const src = await fabricSource(ctx);
+      if (!d.rate) d.rate = src.rate;
+      if (!(num(d.qty) > 0)) throw ApiError.badRequest('Return quantity must be greater than 0');
+      const others = sum(await models.fabricReturn.find({ [d.booking ? 'booking' : 'forecast']: src._id, returnType: d.returnType, isDeleted: false, status: { $ne: 'Cancelled' }, _id: { $ne: ctx.existing?._id } }).lean(), 'qty');
+      if ([ADJUST_SHORT, ADJUST_EXCESS].includes(d.returnType)) {
+        if (!d.booking) throw ApiError.badRequest('A stock adjustment is against the job fabric booking');
+        if (d.returnType === ADJUST_SHORT) guard(ctx, num(d.qty) <= num(src.balanceQty) + (ctx.existing?.returnType === ADJUST_SHORT ? num(ctx.existing.qty) : 0) + 0.0005, `Shortage ${d.qty} ${src.unit} exceeds the store balance (${src.balanceQty} ${src.unit})`);
+      } else if (d.returnType === RETURN_TO_STORE) {
+        // only fabric issued to cutting and not used in cutting can come back
+        if (!d.booking) throw ApiError.badRequest('A return from cutting is against the job fabric booking');
+        const usedInCutting = sum(await models.cutting.find({ job: ctx.job._id, isDeleted: false, status: { $ne: 'Rejected' } }).lean(), 'fabricUsed');
+        const unused = num(src.issuedQty) - others - usedInCutting;
+        guard(ctx, num(d.qty) <= unused + 0.0005, `Return ${d.qty} ${src.unit} exceeds fabric issued and not used in cutting (${round(unused, 3)} ${src.unit})`);
+      } else {
+        // to the supplier: rejected rolls first, then store stock (forecast: rejected rolls only)
+        const receipts = await models.fabricReceipt.find({ [d.booking ? 'booking' : 'forecast']: src._id, isDeleted: false }).lean();
+        const rejected = sum(receipts, 'rejectedQty');
+        const available = d.booking ? num(src.balanceQty) + (ctx.existing?.returnType === RETURN_TO_SUPPLIER ? num(ctx.existing.qty) : 0) : rejected - others;
+        guard(ctx, num(d.qty) <= available + 0.0005, `Return ${d.qty} ${src.unit} exceeds ${d.booking ? 'fabric in store' : 'rejected forecast rolls'} (${round(available, 3)} ${src.unit})`);
+      }
+      ctx.data = applyCompute(MODULES.fabricReturn, d);
+    },
+    async afterSave(ctx) { if (ctx.saved.booking) await syncBookingFromRolls(ctx.saved.booking, ctx.saved.returnDate); },
+    async afterDelete(rec) { if (rec.booking) await syncBookingFromRolls(rec.booking); },
+  },
+  fabricDebit: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      if (d.fabricReturn) {
+        const r = await models.fabricReturn.findById(d.fabricReturn).lean();
+        if (!r || r.isDeleted || String(r.job) !== String(ctx.job._id)) throw ApiError.badRequest('The fabric return belongs to a different job');
+        if (!d.booking && !d.forecast) Object.assign(d, r.booking ? { booking: r.booking } : { forecast: r.forecast });
+        if (!num(d.qty)) d.qty = r.qty;
+        if (!num(d.rate)) d.rate = r.rate;
+      }
+      const src = await fabricSource(ctx);
+      if (!num(d.rate)) d.rate = src.rate;
+      if (!d.supplier && src.supplier) d.supplier = src.supplier;
+      if (d.debitTo === 'Supplier' && !d.supplier) throw ApiError.badRequest('Select the supplier the debit note is raised on');
+      if (d.debitTo === 'Department – accountability' && !d.debitParty) throw ApiError.badRequest('Enter the department the debit is raised on');
+      ctx.data = applyCompute(MODULES.fabricDebit, d);
+      if (!(num(ctx.data.amount) > 0)) throw ApiError.badRequest('Debit amount must be greater than 0');
+    },
+    async afterSave(ctx) {
+      const d = ctx.saved;
+      if (d.booking) await syncBookingFromRolls(d.booking, d.debitDate);
+      if (ctx.isCreate) {
+        await notify({
+          type: 'INFO', severity: 'info', title: `Fabric debit note ${d.refNo} – ${d.jobNo}`,
+          message: `${d.reason}: ${d.amount} debited to ${d.debitTo === 'Supplier' ? d.supplierName || 'supplier' : d.debitTo === 'Department – accountability' ? d.debitParty : 'the job'} (${d.costEffect}).`,
+          departments: ['Fabric Department', 'Accounts & Finance', 'Factory Merchandising'], job: ctx.job, module: 'fabricDebit', recordId: d._id, link: `/m/fabricDebit/${d._id}`,
+        });
+      }
+    },
+    async afterDelete(rec) { if (rec.booking) await syncBookingFromRolls(rec.booking); },
+  },
+
+  supplierBill: {
+    async beforeSave(ctx) {
+      const d = ctx.data;
+      const dup = await models.supplierBill.exists({ _id: { $ne: ctx.existing?._id }, supplier: d.supplier, billNo: d.billNo, isDeleted: false });
+      if (dup) throw ApiError.conflict(`Supplier invoice ${d.billNo} is already entered for this supplier`);
+      if (d.fabricBooking && !d.poRef) d.poRef = (await models.fabricBooking.findById(d.fabricBooking).lean())?.supplierPoNo;
+      guard(ctx, num(d.paidAmount) + num(d.debitNoteAdjusted) <= num(d.totalAmount) + 0.005, `Payments ${d.paidAmount} + set-off ${num(d.debitNoteAdjusted)} exceed the bill total ${d.totalAmount}`);
+    },
+  },
+
   /* ---------------- Materials ---------------- */
   fabricBooking: {
     async afterDelete(rec) { await syncLedger('fabricBooking', rec); },
     async beforeSave(ctx) {
       const d = ctx.data;
+      // quantities driven by roll-level receipts / allocations are not typed over
+      if (ctx.existing) {
+        const t = await rollTotals(ctx.existing._id);
+        if (t.receipt) Object.assign(d, t.receipt);
+        if (t.allocation) d.issuedQty = t.allocation.issuedQty;
+        Object.assign(d, t.returns);
+        ctx.data = applyCompute(MODULES.fabricBooking, d);
+      }
       guard(ctx, num(d.approvedQty) <= num(d.inspectedQty) || !num(d.inspectedQty), 'Approved quantity cannot exceed inspected quantity');
       guard(ctx, num(d.inspectedQty) <= num(d.receivedQty), 'Inspected quantity cannot exceed received quantity');
       const available = num(d.approvedQty) || num(d.receivedQty);
       guard(ctx, num(d.issuedQty) <= available, `Issued quantity (${d.issuedQty}) exceeds available fabric (${available})`);
-      guard(ctx, num(d.usedQty) <= num(d.issuedQty) || !num(d.usedQty), 'Used quantity cannot exceed issued quantity');
+      guard(ctx, num(d.usedQty) <= num(d.netIssuedQty ?? d.issuedQty) + 0.0005 || !num(d.usedQty), `Used quantity (${d.usedQty}) cannot exceed net issued quantity (${d.netIssuedQty ?? d.issuedQty})`);
     },
     async afterSave(ctx) {
       const d = ctx.saved;
       await syncLedger('fabricBooking', d); // dated receipt / issue movements for inventory valuation
+      await syncBomFromBooking(d);
       const settings = await getSetting('notifications');
       if (settings.fabricShortage && num(d.shortageQty) > 0 && num(d.receivedQty) > 0) {
         await notify({
@@ -277,6 +439,7 @@ export const hooks = {
     async afterSave(ctx) {
       const d = ctx.saved;
       await syncLedger('trimBooking', d);
+      await syncBomFromBooking(d);
       const s = await getSetting('notifications');
       if (s.trimShortage && num(d.shortageQty) > 0 && num(d.receivedQty) > 0) {
         await notify({
@@ -337,7 +500,7 @@ export const hooks = {
       const limit = num(ctx.job.orderQty) * (1 + num(tol.overCutPct) / 100);
       guard(ctx, prev + num(ctx.data.cutQty) <= limit, `Cumulative cutting (${prev + num(ctx.data.cutQty)}) exceeds order quantity + ${tol.overCutPct}% (${Math.floor(limit)})`);
       // fabric availability
-      const fabricIssued = sum(await models.fabricBooking.find({ job: ctx.job._id, isDeleted: false }).lean(), 'issuedQty');
+      const fabricIssued = round(sum((await models.fabricBooking.find({ job: ctx.job._id, isDeleted: false }).lean()).map((b) => ({ q: num(b.issuedQty) - num(b.returnedFromCuttingQty) })), 'q'), 3);
       const fabricUsedPrev = sum(await others('cutting', ctx), 'fabricUsed');
       if (fabricIssued > 0) guard(ctx, fabricUsedPrev + num(ctx.data.fabricUsed) <= fabricIssued, `Fabric used in cutting (${round(fabricUsedPrev + num(ctx.data.fabricUsed))}) exceeds fabric issued (${fabricIssued})`);
     },
@@ -404,6 +567,7 @@ export const hooks = {
   shipment: {
     async beforeSave(ctx) {
       const d = ctx.data;
+      requirePo(ctx.job, 'shipped');
       if (ctx.isCreate && !num(d.qty)) {
         // pull packing data automatically
         const packs = await models.packing.find({ job: ctx.job._id, isDeleted: false }).lean();
@@ -420,6 +584,7 @@ export const hooks = {
       const prev = sum(await others('shipment', ctx, { status: { $ne: 'Cancelled' } }), 'qty');
       const limit = num(ctx.job.orderQty) * (1 + num(tol.overShipPct) / 100);
       guard(ctx, prev + num(d.qty) <= limit, `Shipment quantity (${prev + num(d.qty)}) exceeds order quantity (${ctx.job.orderQty})`);
+      d.balanceQty = Math.max(num(ctx.job.orderQty) - prev - num(d.qty), 0);
     },
     async afterSave(ctx) {
       const d = ctx.saved;
@@ -431,6 +596,7 @@ export const hooks = {
   invoice: {
     async beforeSave(ctx) {
       const d = ctx.data;
+      requirePo(ctx.job, 'invoiced');
       if (ctx.isCreate && d.shipment && !num(d.qty)) {
         const s = await models.shipment.findById(d.shipment).lean();
         if (s) { d.qty = s.qty; if (!d.invoiceNo) d.invoiceNo = s.invoiceNo; }

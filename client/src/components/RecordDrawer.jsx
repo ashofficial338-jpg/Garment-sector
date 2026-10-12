@@ -34,6 +34,7 @@ export default function RecordDrawer({ def, id, initialJob, onClose, onSaved }) 
   const [tab, setTab] = useState('details');
   const [history, setHistory] = useState([]);
   const [convert, setConvert] = useState(null);
+  const [poAction, setPoAction] = useState(null); // buyer order → { mode: 'create' | 'link' }
   const [impact, setImpact] = useState(null);
   const [versions, setVersions] = useState([]);
 
@@ -202,13 +203,17 @@ export default function RecordDrawer({ def, id, initialJob, onClose, onSaved }) 
             {can(def.key, 'override') && (
               <select style={{ width: 170, height: 30 }} value="" onChange={(e) => e.target.value && changeStatus(e.target.value, { override: true })} title="Admin override (reason required)">
                 <option value="">Override status…</option>
-                {[...def.statuses, ...(def.closeStatuses || [])].filter((s) => s !== rec.status && !(def.isJob && ['Ready to Close', 'Closed'].includes(s))).map((s) => <option key={s}>{s}</option>)}
+                {[...def.statuses, ...(def.closeStatuses || [])].filter((s) => s !== rec.status && !(def.isJob && ['Ready to Close', 'Closed'].includes(s)) && !(def.key === 'buyerOrder' && ['Job Created', 'Linked to Job'].includes(s))).map((s) => <option key={s}>{s}</option>)}
               </select>
             )}
             {def.pdf && <><button className="btn btn-sm" onClick={() => pdf(false)}><Icon name="FileDown" size={14} /> PDF</button>
               {rec.jobNo && can('documents', 'create') && <button className="btn btn-sm" onClick={() => pdf(true)} title="Generate and store in Documents"><Icon name="FolderUp" size={14} /> Save to Docs</button>}</>}
             {def.key === 'quotation' && rec.status === 'Approved' && can('orders', 'create') && <button className="btn btn-sm btn-success" onClick={() => setConvert({ poNo: '', shipmentDate: '', orderDate: new Date().toISOString().slice(0, 10), destination: '' })}><Icon name="BadgeCheck" size={14} /> Confirm Order</button>}
             {def.key === 'quotation' && !['Converted', 'Revised'].includes(rec.status) && can('quotation', 'create') && <button className="btn btn-sm" onClick={revise}><Icon name="GitBranch" size={14} /> Revise</button>}
+            {def.key === 'buyerOrder' && !rec.jobNo && ['Received', 'Under Review'].includes(rec.status) && <>
+              {can('orders', 'create') && <button className="btn btn-sm btn-success" onClick={() => setPoAction({ mode: 'create', shipmentDate: rec.shipmentDate ? rec.shipmentDate.slice(0, 10) : '' })}><Icon name="BadgeCheck" size={14} /> Create Job</button>}
+              {can('orders', 'edit') && <button className="btn btn-sm" onClick={() => setPoAction({ mode: 'link', job: null })} title="The buyer PO for a job opened in advance (forecast / repeat order)"><Icon name="GitBranch" size={14} /> Link to advance job</button>}
+            </>}
             {(rec.jobNo) && <button className="btn btn-sm" onClick={() => nav(`/jobs/${rec.jobNo}`)}><Icon name="RadioTower" size={14} /> Control Tower</button>}
           </div>
         </div>
@@ -289,6 +294,31 @@ export default function RecordDrawer({ def, id, initialJob, onClose, onSaved }) 
             <tbody>{versions.map((v) => <tr key={v._id} style={v._id === rec._id ? { background: 'var(--primary-50)' } : undefined}><td className="mono">{v.refNo}</td><td>v{v.version}</td><td>{fmtDate(v.quoteDate)}</td><td className="num">{fmtNum(v.orderQty)}</td><td className="num">{fmtNum(v.price, 2)}</td><td className="num">{fmtNum(v.quoteValue, 2)}</td><td><StatusBadge status={v.status} /></td></tr>)}</tbody>
           </table>
         </div>
+      )}
+
+      {poAction && (
+        <Modal
+          title={poAction.mode === 'create' ? `Create job from buyer PO ${rec.poNo}` : `Link buyer PO ${rec.poNo} to an advance job`}
+          onClose={() => setPoAction(null)}
+          footer={<><button className="btn" onClick={() => setPoAction(null)}>Cancel</button>
+            <button className="btn btn-success" disabled={poAction.mode === 'link' && !poAction.job} onClick={async () => {
+              try {
+                const data = poAction.mode === 'create'
+                  ? (await api.post(`/jobs/from-buyer-order/${rec._id}`, { shipmentDate: poAction.shipmentDate || undefined })).data
+                  : (await api.post(`/jobs/${poAction.job._id}/link-po`, { buyerOrder: rec._id })).data.job;
+                toast(poAction.mode === 'create' ? `Job ${data.jobNo} created from PO ${rec.poNo}` : `PO ${rec.poNo} linked – ${data.jobNo} is now a confirmed order`);
+                setPoAction(null); onSaved?.(); onClose(); nav(`/jobs/${data.jobNo}`);
+              } catch (e) { toast(errMsg(e), 'err'); }
+            }}><Icon name="BadgeCheck" size={15} /> {poAction.mode === 'create' ? 'Create Job' : 'Link PO'}</button></>}
+        >
+          {poAction.mode === 'create' ? <>
+            <p className="muted small">{rec.quotation ? 'Style, fabric, costing and trims are pulled from the linked approved quotation; PO, quantity, colour, size ratio and dates from this buyer order.' : 'No quotation is linked – the job is opened from this buyer order. Fabric and trims can be completed on the job.'} The Job No is generated from the {user.unit.name} series.</p>
+            <div className="form-grid"><Field label="Ex-factory / Shipment Date" hint="Blank = buyer delivery date"><input type="date" value={poAction.shipmentDate} onChange={(e) => setPoAction({ ...poAction, shipmentDate: e.target.value })} /></Field></div>
+          </> : <>
+            <p className="muted small">Only {rec.buyerName}'s jobs opened in advance (PO Status “Awaiting PO”) are listed. The job takes this PO's number, quantity, size ratio and dates as an order revision.</p>
+            <Field label="Advance job / sub job" required><RefSelect refModel="Job" value={poAction.job?._id} params={{ awaitingPo: 'true', open: 'true', buyer: rec.buyer?._id || rec.buyer }} onChange={(v) => !v && setPoAction({ ...poAction, job: null })} onPick={(it) => setPoAction({ ...poAction, job: it })} placeholder="Search Job No / Style…" /></Field>
+          </>}
+        </Modal>
       )}
 
       {convert && (

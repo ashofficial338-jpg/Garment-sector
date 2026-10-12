@@ -57,13 +57,15 @@ export const bom = {
   defaultStatus: 'Draft',
   fields: [
     n('revision', 'Revision No', { list: true, section: 'BOM', default: 1 }),
+    date('bomDate', 'BOM Date'),
     n('orderQty', 'Order Qty (pcs)', { list: true }),
     table('lines', 'Material Lines', [
       sel('category', 'Category', BOM_CATEGORIES, { default: 'Trim' }), text('item', 'Item / Fabric'), text('description', 'Spec'),
       text('color', 'Color'), sel('unit', 'Unit', UNITS, { default: 'Pcs' }), n('consumptionPerPc', 'Cons / pc'),
       n('wastagePct', 'Wastage %'), n('rate', 'Rate'),
       calc('requiredQty', 'Required'), calc('amount', 'Value'), calc('bookingRef', 'Booking', { type: 'text' }),
-    ], { section: 'Materials', hint: 'Approving the BOM creates a fabric / trim booking for every line that has none' }),
+      calc('receivedQty', 'Received'), calc('issuedQty', 'Issued'), calc('consumedQty', 'Consumed'), calc('balanceQty', 'Balance'),
+    ], { section: 'Materials', hint: 'Planned (cons / pc) → Required → Issued → Consumed → Balance. Approving the BOM books every line that has no booking; received / issued / consumed follow the bookings' }),
     calc('fabricCostPerPc', 'Fabric Cost / pc', { section: 'Cost (per piece)' }),
     calc('trimCostPerPc', 'Trims & Accessories / pc'),
     calc('materialCostPerPc', 'Material Cost / pc', { list: true }),
@@ -141,6 +143,7 @@ export const marker = {
   fields: [
     ref('pattern', 'Pattern', 'Pattern', { section: 'Marker', jobScoped: true }),
     text('markerNo', 'Marker No', { required: true, list: true, search: true }),
+    date('markerDate', 'Marker Date'),
     sel('markerType', 'Marker Type', ['Production', 'Sample', 'Test'], { default: 'Production' }),
     text('color', 'Color', { list: true }),
     text('fabricType', 'Fabric', { search: true }),

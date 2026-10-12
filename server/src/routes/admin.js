@@ -8,7 +8,7 @@ import { Session } from '../models/Session.js';
 import { AuditLog } from '../models/AuditLog.js';
 import { permit, adminOnly, clearUserCache, scopeFromQuery } from '../middleware/auth.js';
 import { runWithUnit, ALL_UNITS } from '../services/unitContext.js';
-import { peekJobNo, setNextJobNo } from '../services/numbering.js';
+import { peekJobNo, setNextJobNo, highestIssuedJobNo } from '../services/numbering.js';
 import { DEFAULT_UNITS } from '../../../shared/constants.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
@@ -212,6 +212,8 @@ r.get('/units', permit('settings', 'view'), asyncHandler(async (_req, res) => {
   const rows = await runWithUnit(ALL_UNITS, () => Promise.all(units.map(async (u) => ({
     ...u,
     nextJobNo: await peekJobNo(u.code),
+    // lowest number Admin may reset the series to (never at or below an issued number)
+    minNextJobNo: Math.max(Number(u.start), (await highestIssuedJobNo(u.code)) + 1),
     jobs: await models.orders.countDocuments({ businessUnit: u.code, isDeleted: false, parentJob: null }),
     openJobs: await models.orders.countDocuments({ businessUnit: u.code, isDeleted: false, parentJob: null, status: { $nin: ['Closed', 'Cancelled'] } }),
     users: await User.countDocuments({ isDeleted: false, units: u.code }),

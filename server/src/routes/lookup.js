@@ -18,10 +18,13 @@ const SOURCES = {
   Costing: { model: 'costing', fields: 'refNo styleNo buyerName status sellingPrice', search: ['refNo', 'styleNo', 'buyerName'], label: (x) => `${x.refNo} · ${x.styleNo} · ${x.status}` },
   Quotation: { model: 'quotation', fields: 'refNo styleNo buyerName version status', search: ['refNo', 'styleNo'], label: (x) => `${x.refNo} v${x.version} · ${x.styleNo}` },
   Invoice: { model: 'invoice', fields: 'refNo invoiceNo jobNo totalAmount outstanding currency', search: ['invoiceNo', 'jobNo'], label: (x) => `${x.invoiceNo} · ${x.jobNo} · O/S ${x.outstanding} ${x.currency}` },
+  FabricBooking: { model: 'fabricBooking', fields: 'refNo jobNo fabricType color unit requiredQty receivedQty issuedQty status', search: ['refNo', 'jobNo', 'fabricType'], label: (x) => `${x.refNo} · ${x.fabricType} ${x.color || ''} · req ${x.requiredQty ?? 0} / rcvd ${x.receivedQty ?? 0} ${x.unit || ''}` },
   FabricForecast: { model: 'fabricForecast', fields: 'refNo jobNo fabricType color unit lotNo receivedQty transferredQty balanceQty status', search: ['refNo', 'jobNo', 'fabricType', 'lotNo'], label: (x) => `${x.refNo} · ${x.fabricType} ${x.color || ''} · lot ${x.lotNo || '—'} · available ${x.balanceQty ?? 0} ${x.unit || ''}` },
   TechSpec: { model: 'techSpec', fields: 'refNo jobNo revision status', search: ['refNo', 'jobNo'], label: (x) => `${x.refNo} rev ${x.revision || 1} · ${x.jobNo} · ${x.status}` },
   Pattern: { model: 'pattern', fields: 'refNo jobNo patternNo revision status', search: ['refNo', 'patternNo', 'jobNo'], label: (x) => `${x.patternNo} rev ${x.revision || 1} · ${x.jobNo} · ${x.status}` },
   Marker: { model: 'marker', fields: 'refNo jobNo markerNo ratio status', search: ['refNo', 'markerNo', 'jobNo'], label: (x) => `${x.markerNo} · ${x.ratio || ''} · ${x.status}` },
+  FabricReturn: { model: 'fabricReturn', fields: 'refNo jobNo returnType qty unit rate status', search: ['refNo', 'jobNo'], label: (x) => `${x.refNo} · ${x.jobNo} · ${x.qty} ${x.unit || ''} · ${x.returnType}` },
+  BuyerOrder: { model: 'buyerOrder', fields: 'refNo poNo styleNo buyerName orderQty orderType deliveryDate status jobNo', search: ['refNo', 'poNo', 'styleNo', 'buyerName'], label: (x) => `${x.poNo} · ${x.styleNo} · ${x.orderQty} pcs · ${x.buyerName || ''} (${x.refNo})` },
   Shipment: { model: 'shipment', fields: 'refNo invoiceNo jobNo qty status', search: ['refNo', 'invoiceNo', 'jobNo'], label: (x) => `${x.refNo} · ${x.jobNo} · ${x.qty} pcs` },
 };
 
@@ -57,6 +60,10 @@ r.get('/:ref', asyncHandler(async (req, res) => {
   if (req.query.job && src.model !== 'orders') f.jobNo = req.query.job;
   if (req.query.id && mongoose.isValidObjectId(req.query.id)) { delete f.$or; f._id = req.query.id; }
   if (req.params.ref === 'Job' && req.query.open === 'true') f.status = { $nin: ['Closed', 'Cancelled'] };
+  if (req.params.ref === 'Job' && req.query.awaitingPo === 'true') f.poStatus = 'Awaiting PO';
+  // buyer POs not yet on a job
+  if (req.params.ref === 'BuyerOrder' && req.query.open === 'true') { f.status = { $in: ['Received', 'Under Review'] }; f.jobNo = { $in: [null, ''] }; }
+  if (req.query.buyer && mongoose.isValidObjectId(req.query.buyer) && ['Job', 'BuyerOrder'].includes(req.params.ref)) f.buyer = req.query.buyer;
   const rows = await models[src.model].find(f).select(src.fields).sort({ createdAt: -1 }).limit(30).lean();
   res.json(rows.map((x) => ({ ...x, label: src.label(x) })));
 }));

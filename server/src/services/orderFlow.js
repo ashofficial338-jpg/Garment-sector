@@ -6,7 +6,7 @@
  * Also handles quotation → order conversion, forecast sub jobs and change propagation.
  */
 import { models } from '../modules/builder.js';
-import { MODULES, applyCompute } from '../../../shared/modules/index.js';
+import { MODULES, applyCompute, validateRecord } from '../../../shared/modules/index.js';
 import { generateTna, num, sum } from '../../../shared/calc.js';
 import { UNITS } from '../../../shared/constants.js';
 import { TRIM_ITEMS } from '../../../shared/modules/commercial.js';
@@ -175,14 +175,18 @@ export async function createJob(data, req, { skipDownstream = false } = {}) {
   const businessUnit = resolveUnit(data.businessUnit);
   const jobNo = data.jobNo || await nextJobNo(businessUnit);
   const body = applyCompute(def, { ...data, status: 'Confirmed' });
+  // Main Job · Forecast / Continuous Job (main of call-offs) · Sub Job · Transfer Sub Job (created by a fabric transfer)
+  // advance job: opened for a forecast / repeat order before the buyer PO exists – not a confirmed order
+  const advance = data.poStatus === 'Awaiting PO';
+  const jobType = data.jobType || (data.parentJob ? 'Sub Job' : data.isForecast ? 'Forecast / Continuous Job' : 'Main Job');
   const job = await models.orders.create({
-    ...body,
+    ...body, jobType, revision: 0,
     jobNo, orderNo: orderNoFromJobNo(jobNo), refNo: jobNo, businessUnit,
     buyerName: await buyerName(data.buyer),
     createdBy: req?.user?._id, createdByName: req?.user?.name || 'system',
-    statusHistory: [{ from: null, to: 'Confirmed', by: req?.user?._id, byName: req?.user?.name, reason: 'Order confirmed' }],
+    statusHistory: [{ from: null, to: 'Confirmed', by: req?.user?._id, byName: req?.user?.name, reason: advance ? 'Advance job opened – awaiting the buyer PO' : 'Order confirmed' }],
   });
-  await audit(req, { action: 'CREATE', module: 'orders', record: job, message: `Order confirmed – Job ${jobNo} generated` });
+  await audit(req, { action: 'CREATE', module: 'orders', record: job, message: advance ? `Advance job ${jobNo} opened for a forecast / repeat order – awaiting the buyer PO` : `Order confirmed – Job ${jobNo} generated` });
   if (!skipDownstream && !job.isForecast) await generateDownstream(job.toObject(), req);
   if (!skipDownstream && job.isForecast) await ensureFabricForecast(job.toObject(), req);
   await refreshJob(job._id);
@@ -196,7 +200,8 @@ export async function convertQuotation(quotationId, extra, req) {
   if (q.status !== 'Approved') throw ApiError.badRequest('Only an Approved quotation can be converted to an order');
   const costing = q.costing ? await models.costing.findById(q.costing).lean() : null;
   const enquiry = q.enquiry ? await models.enquiry.findById(q.enquiry).lean() : null;
-  if (!extra.poNo) throw ApiError.badRequest('PO No is required to confirm the order');
+  // an advance job (forecast / repeat order) is opened from the quotation before the buyer PO exists
+  if (!extra.poNo && extra.poStatus !== 'Awaiting PO') throw ApiError.badRequest('PO No is required to confirm the order');
   if (!extra.shipmentDate) throw ApiError.badRequest('Shipment date is required to confirm the order');
 
   const job = await createJob({
@@ -215,6 +220,122 @@ export async function convertQuotation(quotationId, extra, req) {
   if (q.enquiry) await models.enquiry.updateOne({ _id: q.enquiry }, { $set: { status: 'Converted', ...jobLink(job) } });
   await refreshJob(job._id);
   return job;
+}
+
+/** "S:2,M:4,L:3" → size breakdown of `qty` pieces in that ratio (rounding goes to the largest size share). */
+export function breakdownFromRatio(ratio, qty, color) {
+  const parts = String(ratio || '').split(',').map((p) => p.split(':').map((x) => x.trim())).filter(([s, q]) => s && num(q) > 0);
+  if (!parts.length || !(num(qty) > 0)) return [];
+  const total = parts.reduce((t, [, q]) => t + num(q), 0);
+  const rows = parts.map(([size, q]) => ({ color, size, qty: Math.floor((num(qty) * num(q)) / total) }));
+  [...rows].sort((a, b) => b.qty - a.qty)[0].qty += num(qty) - sum(rows, 'qty');
+  return rows;
+}
+
+async function markBuyerOrder(bo, job, status, req) {
+  await models.buyerOrder.updateOne({ _id: bo._id }, {
+    $set: { status, job: job._id, jobNo: job.jobNo, jobCreation: status === 'Linked to Job' ? `Linked to advance job ${job.jobNo}` : `Job ${job.jobNo} created`, linkedAt: new Date() },
+    $push: { statusHistory: { from: bo.status, to: status, by: req.user._id, byName: req.user.name, reason: `${status === 'Linked to Job' ? 'Linked to' : 'Converted to'} ${job.jobNo}` } },
+  });
+  await audit(req, { action: 'STATUS', module: 'buyerOrder', record: bo, changes: [{ field: 'status', old: bo.status, new: status }], message: `${req.user.name}: buyer PO ${bo.poNo} (${bo.refNo}) → ${status} ${job.jobNo}` });
+}
+
+/**
+ * New Order (buyer PO) → Job. With an approved quotation everything (fabric, costing, trims) is pulled through
+ * the quotation; otherwise the job is opened from the PO itself. `extra` may add order details (fabric, trims…).
+ */
+export async function jobFromBuyerOrder(id, extra, req) {
+  const bo = await models.buyerOrder.findById(id).lean();
+  if (!bo || bo.isDeleted) throw ApiError.notFound('Buyer order not found');
+  if (bo.jobNo) throw ApiError.badRequest(`Buyer PO ${bo.poNo} already has job ${bo.jobNo}`);
+  if (bo.status === 'Cancelled') throw ApiError.badRequest('Buyer order is cancelled');
+  const colors = String(bo.color || '').split(/[,/]/).map((x) => x.trim()).filter(Boolean);
+  const sizeBreakdown = breakdownFromRatio(bo.sizeRatio, bo.orderQty, colors[0]);
+  const fromPo = {
+    poNo: bo.poNo, poStatus: 'PO Received', orderDate: bo.orderDate, deliveryDate: bo.deliveryDate, shipmentDate: bo.shipmentDate || bo.deliveryDate,
+    orderQty: bo.orderQty, destination: bo.destination, repeatOfJobNo: bo.repeatOfJobNo,
+    ...(num(bo.unitPrice) > 0 ? { unitPrice: bo.unitPrice } : {}),
+    ...(colors.length ? { colors } : {}), ...(sizeBreakdown.length ? { sizes: sizeBreakdown.map((x) => x.size), sizeBreakdown } : {}),
+  };
+  const data = { ...fromPo, ...Object.fromEntries(Object.entries(extra).filter(([, v]) => v !== undefined && v !== '')) };
+  let job;
+  if (bo.quotation) job = await convertQuotation(bo.quotation, data, req);
+  else {
+    const order = { buyer: bo.buyer, styleNo: bo.styleNo, product: bo.product, garmentType: bo.garmentType, currency: bo.currency, ...data };
+    const errors = validateRecord(MODULES.orders, applyCompute(MODULES.orders, order));
+    if (Object.keys(errors).length) throw ApiError.badRequest('Order details missing – link an approved quotation or complete the order', errors);
+    job = await createJob(order, req);
+  }
+  await markBuyerOrder(bo, job, 'Job Created', req);
+  return job;
+}
+
+/**
+ * The actual buyer PO arrives for an advance (forecast) job: the job becomes PO-backed. Quantity and dates follow
+ * the PO (not for a main job, whose quantity is the sum of its sub jobs). The change is an order revision.
+ * When every sub job of an advance main job is PO-backed, the main job is too.
+ */
+export async function linkPoToJob(jobId, body, req) {
+  const job = await models.orders.findById(jobId);
+  if (!job || job.isDeleted) throw ApiError.notFound('Job not found');
+  if (job.poStatus !== 'Awaiting PO') throw ApiError.badRequest(`${job.jobNo} already has its PO (${job.poNo})`);
+  if (['Closed', 'Cancelled'].includes(job.status)) throw ApiError.badRequest(`Job ${job.jobNo} is ${job.status}`);
+  const bo = body.buyerOrder ? await models.buyerOrder.findById(body.buyerOrder).lean() : null;
+  if (body.buyerOrder && (!bo || bo.isDeleted)) throw ApiError.notFound('Buyer order not found');
+  if (bo?.jobNo) throw ApiError.badRequest(`Buyer PO ${bo.poNo} is already on job ${bo.jobNo}`);
+  if (bo && String(bo.buyer) !== String(job.buyer)) throw ApiError.badRequest(`Buyer PO ${bo.poNo} is from ${bo.buyerName}, job ${job.jobNo} is for ${job.buyerName}`);
+  const poNo = String(bo?.poNo || body.poNo || '').trim();
+  if (!poNo) throw ApiError.badRequest('PO No is required');
+  if (await models.orders.exists({ _id: { $ne: job._id }, buyer: job.buyer, poNo, styleNo: job.styleNo, isDeleted: false })) throw ApiError.conflict(`PO ${poNo} / style ${job.styleNo} is already on another job`);
+  const hasSubs = await models.orders.exists({ parentJob: job._id, isDeleted: false });
+  const qty = num(bo?.orderQty ?? body.orderQty);
+  const before = job.toObject();
+  job.poNo = poNo;
+  job.poStatus = 'PO Received';
+  if (qty > 0 && !hasSubs) {
+    const color = String(bo?.color || '').split(/[,/]/)[0].trim() || (job.colors || [])[0];
+    const ratio = bo?.sizeRatio || (job.sizeBreakdown || []).map((x) => `${x.size}:${x.qty}`).join(',');
+    job.orderQty = qty;
+    const bd = breakdownFromRatio(ratio, qty, color);
+    if (bd.length) job.sizeBreakdown = bd;
+  }
+  const deliveryDate = bo?.deliveryDate || body.deliveryDate;
+  const shipmentDate = bo?.shipmentDate || body.shipmentDate;
+  if (deliveryDate) job.deliveryDate = deliveryDate;
+  if (shipmentDate) job.shipmentDate = shipmentDate;
+  if (num(bo?.unitPrice) > 0) job.unitPrice = bo.unitPrice;
+  const next = applyCompute(MODULES.orders, job.toObject());
+  job.orderValue = next.orderValue;
+  job.requiredFabricQty = next.requiredFabricQty;
+  const after = job.toObject();
+  const fields = ['poNo', 'poStatus', 'orderQty', 'deliveryDate', 'shipmentDate', 'unitPrice', 'sizeBreakdown'].filter((f) => JSON.stringify(before[f]) !== JSON.stringify(after[f]));
+  const rev = num(job.revision) + 1;
+  job.revision = rev;
+  job.revisions.push({ rev, at: new Date(), byName: req.user.name, fields, reason: `Actual PO ${poNo} received${bo ? ` (${bo.refNo})` : ''}` });
+  job.updatedBy = req.user._id;
+  await job.save();
+  const changes = fields.map((f) => ({ field: f, old: before[f], new: after[f] }));
+  await audit(req, { action: 'UPDATE', module: 'orders', record: job, changes, message: `${req.user.name} linked actual PO ${poNo} to advance job ${job.jobNo}` });
+  const impact = await propagateJobChanges(job.toObject(), changes, req);
+  if (bo) await markBuyerOrder(bo, job, 'Linked to Job', req);
+  // advance main job: PO-backed once every sub job has its PO
+  if (job.parentJob) {
+    const main = await models.orders.findById(job.parentJob);
+    const subs = await models.orders.find({ parentJob: job.parentJob, isDeleted: false }).lean();
+    if (main?.poStatus === 'Awaiting PO' && subs.every((s) => s.poStatus !== 'Awaiting PO')) {
+      main.poStatus = 'PO Received';
+      main.poNo = main.poNo || [...new Set(subs.map((s) => s.poNo))].join(', ').slice(0, 120);
+      await main.save();
+      await audit(req, { action: 'UPDATE', module: 'orders', record: main, changes: [{ field: 'poStatus', old: 'Awaiting PO', new: 'PO Received' }], message: `All sub jobs of ${main.jobNo} are PO-backed` });
+    }
+  }
+  await notify({
+    type: 'INFO', severity: 'success', title: `Actual PO received: ${job.jobNo}`,
+    message: `${job.buyerName} PO ${poNo} linked to advance job ${job.jobNo} (${job.orderQty} pcs). It is now a confirmed, PO-backed order.`,
+    departments: ['Head Office Merchandising', 'Factory Merchandising', 'Fabric Department', 'Production'], job, link: `/jobs/${job.jobNo}`,
+  });
+  await refreshJob(job._id);
+  return { job: await models.orders.findById(job._id).lean(), impact };
 }
 
 /** Forecast / continuous orders: split a main job into sub jobs (Admin only – enforced by route). */
@@ -237,7 +358,7 @@ export async function createSubJobs(mainId, parts, req) {
     const jobNo = await nextSubJobCode(main.jobNo);
     const { _id, createdAt, updatedAt, stages, statusHistory, refNo, orderNo, ...base } = main;
     const sub = await createJob({
-      ...base, ...p, jobNo, parentJob: main._id, parentJobNo: main.jobNo, subJobCode: jobNo.split('-').pop(),
+      ...base, ...p, jobNo, parentJob: main._id, parentJobNo: main.jobNo, subJobCode: jobNo.split('-').pop(), jobType: p.jobType || 'Sub Job', revisions: [],
       isForecast: false, forecastQty: 0, sizeBreakdown: p.sizeBreakdown || [],
       orderDate: p.orderDate || new Date(), shipmentDate: p.shipmentDate || main.shipmentDate,
     }, req);

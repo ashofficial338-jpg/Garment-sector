@@ -4,6 +4,7 @@ import { costSheet, fabricRequirement, round, num, sum, COST_COMPONENTS } from '
 
 export const INCOTERMS = ['FOB', 'CIF', 'CFR', 'EXW', 'FCA', 'DDP', 'DAP', 'CPT'];
 export const PAYMENT_TERMS = ['LC at sight', 'LC 30 days', 'LC 60 days', 'TT advance', 'TT 30 days', 'TT 60 days', 'DA 60 days', 'DP at sight', 'Open account'];
+export const PO_STATUSES = ['PO Received', 'Awaiting PO'];
 export const TRIM_ITEMS = ['Button', 'Zipper', 'Main Label', 'Care Label', 'Size Label', 'Hang Tag', 'Polybag', 'Carton', 'Thread', 'Elastic', 'Rib', 'Tape', 'Drawcord', 'Interlining', 'Sticker', 'Tissue Paper', 'Hanger', 'Other'];
 
 const fabricSpec = [
@@ -46,6 +47,7 @@ export const costing = {
   defaultStatus: 'Draft',
   fields: [
     ref('enquiry', 'Enquiry', 'Enquiry', { section: 'Reference' }),
+    date('costingDate', 'Costing Date'),
     ref('buyer', 'Buyer', 'Buyer', { required: true }),
     text('styleNo', 'Style No', { required: true, list: true, search: true }),
     text('product', 'Product', { list: true }),
@@ -104,6 +106,49 @@ export const quotation = {
   compute: (d) => ({ quoteValue: round(num(d.orderQty) * num(d.price)) }),
 };
 
+/* ------------------------------ Buyer Order register (New Orders) ------------------------------ */
+/**
+ * Every buyer PO as it is received, before (and after) it becomes a job. "Create Job" converts it
+ * (through its approved quotation when there is one); "Link to Job" attaches it to an advance /
+ * forecast job that was opened before the PO arrived. The assigned Job No is set only by those actions.
+ */
+export const BUYER_ORDER_TYPES = ['New Order', 'Repeat Order', 'Forecast Call-off'];
+/** Set only by the Create Job / Link to Job actions – never by a manual status change. */
+export const BUYER_ORDER_DONE = ['Job Created', 'Linked to Job'];
+const buyerOrderFlow = flow(['Received', 'Under Review'], { Received: ['Cancelled'], 'Under Review': ['Cancelled'] });
+export const buyerOrder = {
+  key: 'buyerOrder', model: 'BuyerOrder', title: 'New Orders (Buyer POs)', singular: 'Buyer Order', group: 'Merchandising', icon: 'Inbox',
+  department: 'Head Office Merchandising', prefix: 'BPO', jobLinked: false, stage: 'order',
+  statuses: [...buyerOrderFlow.statuses, ...BUYER_ORDER_DONE], transitions: buyerOrderFlow.transitions,
+  defaultStatus: 'Received',
+  fields: [
+    sel('orderType', 'Order Type', BUYER_ORDER_TYPES, { default: 'New Order', list: true, filter: true, section: 'Order' }),
+    ref('buyer', 'Buyer', 'Buyer', { required: true }),
+    text('poNo', 'Buyer PO No', { required: true, list: true, search: true }),
+    text('styleNo', 'Style No', { required: true, list: true, search: true }),
+    text('product', 'Product / Garment', { list: true }),
+    text('garmentType', 'Garment Type'),
+    date('orderDate', 'PO Date', { required: true, list: true }),
+    date('deliveryDate', 'Delivery Date', { required: true, list: true }),
+    date('shipmentDate', 'Ex-factory / Shipment Date'),
+    n('orderQty', 'Order Qty (pcs)', { required: true, list: true }),
+    n('unitPrice', 'Unit Price'),
+    sel('currency', 'Currency', CURRENCIES, { default: 'USD' }),
+    calc('orderValue', 'Order Value'),
+    text('color', 'Color(s)'), text('sizeRatio', 'Size Ratio', { hint: 'e.g. S:2,M:4,L:3,XL:1' }),
+    text('destination', 'Destination'),
+    ref('quotation', 'Approved Quotation', 'Quotation', { section: 'Job', hint: 'Create Job pulls style, fabric and costing from this quotation' }),
+    text('repeatOfJobNo', 'Repeat of Job No', { hint: 'Previous job for a repeat order' }),
+    calc('jobNo', 'Assigned Job No', { type: 'text', list: true, search: true }),
+    calc('jobCreation', 'Job Creation Status', { type: 'text', list: true }),
+    area('remarks', 'Remarks'),
+  ],
+  compute: (d) => ({
+    orderValue: round(num(d.orderQty) * num(d.unitPrice)),
+    jobCreation: d.jobNo ? (d.status === 'Linked to Job' ? `Linked to advance job ${d.jobNo}` : `Job ${d.jobNo} created`) : d.status === 'Cancelled' ? 'Cancelled' : 'Awaiting job creation',
+  }),
+};
+
 /* ------------------------------ Order / Job ------------------------------ */
 export const orders = {
   key: 'orders', model: 'Job', title: 'Orders / Jobs', singular: 'Order', group: 'Merchandising', icon: 'ClipboardCheck',
@@ -114,9 +159,13 @@ export const orders = {
   fields: [
     calc('jobNo', 'Job No', { type: 'text', list: true, search: true, section: 'Order' }),
     calc('orderNo', 'Order No', { type: 'text', search: true }),
+    calc('jobType', 'Job Type', { type: 'text', list: true }),
+    calc('revision', 'Order Revision'),
     ref('buyer', 'Buyer', 'Buyer', { required: true }),
     text('buyerContact', 'Buyer Contact'),
-    text('poNo', 'PO No', { required: true, list: true, search: true }),
+    // advance (forecast) jobs are opened before the buyer's PO exists: PO No is required once the PO is received
+    sel('poStatus', 'PO Status', PO_STATUSES, { default: 'PO Received', list: true, filter: true }),
+    text('poNo', 'PO No', { required: true, requiredIf: (d) => d.poStatus !== 'Awaiting PO', list: true, search: true }),
     text('styleNo', 'Style No', { required: true, list: true, search: true }),
     text('product', 'Product / Garment', { list: true }),
     text('garmentType', 'Garment Type'),
@@ -146,6 +195,8 @@ export const orders = {
     ], { section: 'Trims' }),
     bool('isForecast', 'Forecast / Continuous Order', { section: 'Forecast' }),
     n('forecastQty', 'Forecast Qty (pcs)'),
+    text('expectedOrderMonth', 'Expected Next Order Month', { hint: 'YYYY-MM – repeat / forecast orders' }),
+    text('repeatOfJobNo', 'Repeat of Job No', { hint: 'Previous job of this buyer / style' }),
     calc('subJobCount', 'Sub Jobs'),
     area('specialInstructions', 'Special Instructions', { section: 'Notes' }),
   ],

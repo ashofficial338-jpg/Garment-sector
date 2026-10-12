@@ -24,6 +24,8 @@ const Masters = lazy(() => import('./pages/Masters.jsx'));
 const Profit = lazy(() => import('./pages/Profit.jsx'));
 const Analytics = lazy(() => import('./pages/Analytics.jsx'));
 const StockReports = lazy(() => import('./pages/StockReports.jsx'));
+const OrderTracking = lazy(() => import('./pages/OrderTracking.jsx'));
+const JobClosureReport = lazy(() => import('./pages/JobClosureReport.jsx'));
 
 export default function App() {
   const { user, ready } = useAuth();
@@ -39,7 +41,9 @@ export default function App() {
           <Route index element={<Dashboard />} />
           <Route path="my-dashboard" element={<DepartmentDashboard />} />
           <Route path="control-tower" element={<ControlTower />} />
+          <Route path="tracking" element={<OrderTracking />} />
           <Route path="jobs/:jobNo" element={<ControlTower />} />
+          <Route path="jobs/:jobNo/closure" element={<JobClosureReport />} />
           <Route path="m/:key" element={<ModulePage />} />
           <Route path="m/:key/:id" element={<ModulePage />} />
           <Route path="masters" element={<Masters />} />

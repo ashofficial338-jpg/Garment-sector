@@ -26,7 +26,7 @@ export default function Reports() {
   const [sp] = useSearchParams();
   const [list, setList] = useState([]);
   const [key, setKey] = useState(sp.get('r') || '');
-  const [f, setF] = useState({ unit: '', from: '', to: '', job: '', buyer: '', style: '', department: '', status: '', createdBy: '' });
+  const [f, setF] = useState({ unit: '', from: '', to: '', job: '', po: '', buyer: '', style: '', department: '', status: '', createdBy: '' });
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
   const [q, setQ] = useState('');
@@ -75,6 +75,7 @@ export default function Reports() {
               <Field label="From"><input type="date" value={f.from} onChange={(e) => setF({ ...f, from: e.target.value })} /></Field>
               <Field label="To"><input type="date" value={f.to} onChange={(e) => setF({ ...f, to: e.target.value })} /></Field>
               <Field label="Job No"><input value={f.job} placeholder={`${user.unit.prefix}-…`} onChange={(e) => setF({ ...f, job: e.target.value })} /></Field>
+              <Field label="PO No"><input value={f.po} onChange={(e) => setF({ ...f, po: e.target.value })} /></Field>
               <Field label="Buyer"><input value={f.buyer} onChange={(e) => setF({ ...f, buyer: e.target.value })} /></Field>
               <Field label="Style"><input value={f.style} onChange={(e) => setF({ ...f, style: e.target.value })} /></Field>
               <Field label="Status"><select value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })}><option value="">All</option>{statuses.map((s) => <option key={s}>{s}</option>)}</select></Field>

@@ -72,13 +72,14 @@ function Tower({ jobNo }) {
   const [open, setOpen] = useState(null); // { def, id }
   const [subForm, setSubForm] = useState(null);
   const [stageFocus, setStageFocus] = useState(null);
+  const [poLink, setPoLink] = useState(null);
 
   const load = () => api.get(`/jobs/track/${encodeURIComponent(jobNo)}`).then((r) => setD(r.data)).catch((e) => setErr(errMsg(e)));
   useEffect(() => { load(); }, [jobNo]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (err) return <Empty icon="SearchX" title={err}><Link to="/control-tower">Search another job</Link></Empty>;
   if (!d) return <Loading />;
-  const { job, lifecycle: lc, records, profit } = d;
+  const { job, lifecycle: lc, records, profit, subJobSummary = [] } = d;
   const isMain = job.isForecast && lc.meta.subJobs?.length;
   const current = lc.order.find((s) => s.key === lc.currentStage);
 
@@ -120,6 +121,14 @@ function Tower({ jobNo }) {
     try { await api.put(`/jobs/${job._id}/subjobs/${s._id}`, { orderQty: Number(qty), reason }); toast('Quantity updated'); load(); } catch (e) { toast(errMsg(e), 'err'); }
   }
 
+  async function linkPo() {
+    try {
+      const body = poLink.buyerOrder ? { buyerOrder: poLink.buyerOrder._id } : { poNo: poLink.poNo, orderQty: poLink.orderQty || undefined, deliveryDate: poLink.deliveryDate || undefined };
+      const { data } = await api.post(`/jobs/${job._id}/link-po`, body);
+      toast(`PO ${data.job.poNo} linked – ${job.jobNo} is now a confirmed order`); setPoLink(null); load();
+    } catch (e) { toast(errMsg(e), 'err'); }
+  }
+
   const prod = lc.meta.production;
   const focusStage = stageFocus || lc.currentStage;
 
@@ -134,7 +143,14 @@ function Tower({ jobNo }) {
         <StatusBadge status={job.status} />
         {isMain && <Badge tone="violet">Forecast main job</Badge>}
         {job.parentJobNo && <Badge tone="blue">Sub job of {job.parentJobNo}</Badge>}
+        {job.jobType && <Badge tone="grey" dot={false}>{job.jobType}</Badge>}
+        {job.poStatus === 'Awaiting PO' && <Badge tone="red" title="Opened in advance for a forecast / repeat order. Not a confirmed order: it cannot be shipped or invoiced until the actual PO is linked.">Advance job – awaiting PO{job.expectedOrderMonth ? ` (${job.expectedOrderMonth})` : ''}</Badge>}
+        {job.repeatOfJobNo && <Badge tone="blue" dot={false}>Repeat of <Link to={`/jobs/${job.repeatOfJobNo}`}>{job.repeatOfJobNo}</Link></Badge>}
+        {job.isSampleData && <Badge tone="amber" dot={false} title="Created by the sample data tool for testing">Sample / Test data</Badge>}
+        {job.poStatus === 'Awaiting PO' && can('orders', 'edit') && !['Closed', 'Cancelled'].includes(job.status) && <button className="btn btn-success" onClick={() => setPoLink({ buyerOrder: null, poNo: '', orderQty: '', deliveryDate: '' })}><Icon name="BadgeCheck" size={15} /> Link actual PO</button>}
+        {job.revision > 0 && <Badge tone="amber" dot={false} title={(job.revisions || []).map((x) => `Rev ${x.rev} ${new Date(x.at).toLocaleDateString('en-GB')} ${x.byName}: ${x.fields.join(', ')}`).join(' | ')}>Order rev {job.revision}</Badge>}
         <button className="btn" onClick={() => setOpen({ def: MODULES.orders, id: job._id })}><Icon name="FileText" size={15} /> Order details</button>
+        <button className="btn" onClick={() => nav(`/jobs/${job.jobNo}/closure`)} title="Every transaction of the main job and its sub jobs, reconciled"><Icon name="ListChecks" size={15} /> Job Closure Report</button>
         {user.isAdmin && <button className="btn" onClick={regenerate} title="Generate any missing T&A, specification, BOM, fabric, trims, PPM, samples, plan"><Icon name="RefreshCcw" size={15} /> Regenerate</button>}
       </PageHead>
 
@@ -207,6 +223,20 @@ function Tower({ jobNo }) {
                     </table>
                   ) : <Empty icon="Inbox" title={isMain ? 'Tracked on sub jobs' : 'No records yet'} />)}
                   {focusStage === 'tna' && records.tna[0] && <TnaGantt tna={records.tna[0]} />}
+                  {focusStage === 'fabric' && (records.fabricReceipt?.length > 0 || records.fabricAllocation?.length > 0) && (
+                    <div className="mt">
+                      {records.fabricReceipt.length > 0 && <><div className="form-section-title">Fabric receipts (lot / roll)</div>
+                        <table className="tbl tbl-mini"><tbody>{records.fabricReceipt.map((r) => (
+                          <tr key={r._id} className="click" onClick={() => setOpen({ def: MODULES.fabricReceipt, id: r._id })}>
+                            <td className="mono link nowrap">{r.refNo}</td><td>{fmtDate(r.receiptDate)} · {r.fabric} · {r.totalRolls} rolls · {fmtNum(r.totalQty, 1)} {r.unit} received · {fmtNum(r.passedQty, 1)} passed{r.rejectedQty > 0 ? ` · ${fmtNum(r.rejectedQty, 1)} rejected` : ''}</td><td className="right"><StatusBadge status={r.status} /></td>
+                          </tr>))}</tbody></table></>}
+                      {records.fabricAllocation.length > 0 && <><div className="form-section-title mt">Fabric allocations (issue to cutting)</div>
+                        <table className="tbl tbl-mini"><tbody>{records.fabricAllocation.map((r) => (
+                          <tr key={r._id} className="click" onClick={() => setOpen({ def: MODULES.fabricAllocation, id: r._id })}>
+                            <td className="mono link nowrap">{r.refNo}</td><td>{fmtDate(r.allocationDate)} · {r.totalRolls} rolls · {fmtNum(r.totalQty, 1)} {r.unit}{r.cuttingTable ? ` · ${r.cuttingTable}` : ''}</td><td className="right"><StatusBadge status={r.status} /></td>
+                          </tr>))}</tbody></table></>}
+                    </div>
+                  )}
                   {focusStage === 'fabric' && (records.fabricForecast?.length > 0 || records.fabricTransfer?.length > 0) && (
                     <div className="mt">
                       {records.fabricForecast.length > 0 && <><div className="form-section-title">Fabric forecast</div>
@@ -233,18 +263,33 @@ function Tower({ jobNo }) {
           {isMain || (job.isForecast && user.isAdmin) ? (
             <Card title="Forecast sub jobs" icon="GitFork" actions={user.isAdmin && <button className="btn btn-sm btn-primary" onClick={() => setSubForm({ rows: [{ orderQty: '', shipmentDate: '' }] })}><Icon name="Plus" size={14} /> Add sub jobs</button>}>
               <div className="muted small mb">Main Job Qty = sum of sub jobs ({fmtNum(job.orderQty)} pcs · forecast {fmtNum(job.forecastQty)}). Only Admin can change the relationship or quantities.</div>
-              {lc.meta.subJobs?.length ? (
-                <table className="tbl tbl-mini">
-                  <thead><tr><th>Sub Job</th><th className="num">Qty</th><th>Stage</th><th>Status</th>{user.isAdmin && <th />}</tr></thead>
-                  <tbody>{lc.meta.subJobs.map((s) => (
-                    <tr key={s._id}>
-                      <td><Link className="mono" to={`/jobs/${s.jobNo}`}>{s.jobNo}</Link></td><td className="num">{fmtNum(s.qty)}</td>
-                      <td style={{ minWidth: 140 }}><div className="small">{STAGE_LABEL[s.currentStage]}</div><Progress value={s.progressPct} /></td>
-                      <td><StatusBadge status={s.status} /></td>
-                      {user.isAdmin && <td><button className="btn btn-sm btn-ghost" onClick={() => editSubQty(s)}><Icon name="Pencil" size={13} /></button></td>}
-                    </tr>
-                  ))}</tbody>
-                </table>
+              {subJobSummary.length ? (
+                <div style={{ overflowX: 'auto' }}>
+                  <table className="tbl tbl-mini">
+                    <thead><tr>
+                      <th>Sub Job</th><th>PO / Ref</th><th>Color · Ratio</th><th className="num">Qty</th><th>Ship Date</th>
+                      <th className="num">Fabric Req / Rcvd / Issued</th><th className="num">Cut</th><th className="num">Sewn</th><th className="num">Finished</th><th className="num">Packed</th><th className="num">Shipped</th>
+                      <th>Stage</th><th>Shipment</th>{profit && <><th className="num">Cost</th><th className="num">Revenue</th><th className="num">Profit</th></>}<th>Status</th>{user.isAdmin && <th />}
+                    </tr></thead>
+                    <tbody>{subJobSummary.map((s) => (
+                      <tr key={s._id}>
+                        <td><Link className="mono" to={`/jobs/${s.jobNo}`}>{s.jobNo}</Link></td>
+                        <td className="small">{s.poNo}</td>
+                        <td className="small">{s.color}<div className="muted">{s.sizeRatio}</div></td>
+                        <td className="num">{fmtNum(s.orderQty)}</td>
+                        <td className="small">{fmtDate(s.shipmentDate)}</td>
+                        <td className="num small">{fmtNum(s.fabricRequired, 1)} / {fmtNum(s.fabricReceived, 1)} / {fmtNum(s.fabricIssued, 1)} {s.fabricUnit}</td>
+                        <td className="num">{fmtNum(s.cutQty)}</td><td className="num">{fmtNum(s.sewnQty)}</td><td className="num">{fmtNum(s.finishedQty)}</td>
+                        <td className="num">{fmtNum(s.packedQty)}</td><td className="num">{fmtNum(s.shippedQty)}</td>
+                        <td style={{ minWidth: 130 }}><div className="small">{STAGE_LABEL[s.currentStage]}</div><Progress value={s.progressPct} /></td>
+                        <td className="small">{s.shipmentStatus}</td>
+                        {profit && <><td className="num">{fmtMoney(s.cost, '')}</td><td className="num">{fmtMoney(s.revenue, '')}</td><td className="num">{fmtMoney(s.profit, '')}{s.revenue ? <div className="muted small">ROI {s.roiPct}%</div> : null}</td></>}
+                        <td><StatusBadge status={s.status} />{s.closedAt && <div className="muted small">{fmtDate(s.closedAt)}</div>}</td>
+                        {user.isAdmin && <td><button className="btn btn-sm btn-ghost" onClick={() => editSubQty({ ...s, qty: s.orderQty })}><Icon name="Pencil" size={13} /></button></td>}
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
               ) : <Empty icon="GitFork" title="No sub jobs yet" />}
             </Card>
           ) : null}
@@ -295,6 +340,20 @@ function Tower({ jobNo }) {
         </div>
       </div>
 
+      {poLink && (
+        <Modal title={`Actual PO for advance job ${job.jobNo}`} onClose={() => setPoLink(null)}
+          footer={<><button className="btn" onClick={() => setPoLink(null)}>Cancel</button><button className="btn btn-success" disabled={!poLink.buyerOrder && !poLink.poNo.trim()} onClick={linkPo}><Icon name="BadgeCheck" size={15} /> Link PO</button></>}>
+          <p className="muted small">The job becomes a confirmed, PO-backed order (logged as an order revision).{d.subJobSummary?.length ? ' Its quantity stays the sum of its sub jobs – link each call-off PO to its sub job.' : ' Quantity, size ratio and dates follow the PO.'}</p>
+          <Field label="Received buyer PO (New Orders)" hint={`${job.buyerName}'s POs not yet on a job`}>
+            <RefSelect refModel="BuyerOrder" value={poLink.buyerOrder?._id} params={{ open: 'true', buyer: job.buyer }} onChange={(v) => !v && setPoLink({ ...poLink, buyerOrder: null })} onPick={(it) => setPoLink({ ...poLink, buyerOrder: it })} placeholder="Search PO No / style…" />
+          </Field>
+          {!poLink.buyerOrder && <div className="form-grid">
+            <Field label="…or PO No" required><input value={poLink.poNo} onChange={(e) => setPoLink({ ...poLink, poNo: e.target.value })} /></Field>
+            {!d.subJobSummary?.length && <Field label="PO Qty (blank = keep)"><input type="number" value={poLink.orderQty} onChange={(e) => setPoLink({ ...poLink, orderQty: e.target.value })} /></Field>}
+            <Field label="Delivery Date"><input type="date" value={poLink.deliveryDate} onChange={(e) => setPoLink({ ...poLink, deliveryDate: e.target.value })} /></Field>
+          </div>}
+        </Modal>
+      )}
       {open && <RecordDrawer def={open.def} id={open.id} initialJob={open.job} onClose={() => setOpen(null)} onSaved={load} />}
       {subForm && (
         <Modal title={`Create sub jobs for ${job.jobNo}`} onClose={() => setSubForm(null)} width="min(620px, calc(100vw - 32px))"

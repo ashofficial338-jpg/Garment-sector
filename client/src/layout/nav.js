@@ -3,12 +3,14 @@ export const NAV = [
   { group: 'Overview', items: [
     { to: '/', label: 'Dashboard', icon: 'LayoutDashboard', perm: ['dashboard'] },
     { to: '/control-tower', label: 'Job 360 / Control Tower', icon: 'RadioTower', perm: ['jobs'] },
+    { to: '/tracking', label: 'Order & Job Tracking', icon: 'ListChecks', perm: ['jobs'] },
     { to: '/my-dashboard', label: 'Department Dashboard', icon: 'Gauge', perm: ['dashboard'] },
   ] },
   { group: 'Merchandising', items: [
     { to: '/m/enquiry', label: 'Buyer Enquiries', icon: 'MessageSquareText', perm: ['enquiry'] },
     { to: '/m/costing', label: 'Costing', icon: 'Calculator', perm: ['costing'] },
     { to: '/m/quotation', label: 'Quotations', icon: 'FileSignature', perm: ['quotation'] },
+    { to: '/m/buyerOrder', label: 'New Orders (Buyer POs)', icon: 'Inbox', perm: ['buyerOrder'] },
     { to: '/m/orders', label: 'Orders / Jobs', icon: 'ClipboardCheck', perm: ['orders'] },
   ] },
   { group: 'Pre-Production', items: [
@@ -25,6 +27,10 @@ export const NAV = [
   { group: 'Materials', items: [
     { to: '/m/fabricForecast', label: 'Fabric Forecast', icon: 'CalendarRange', perm: ['fabricForecast'] },
     { to: '/m/fabricBooking', label: 'Fabric Booking', icon: 'Layers', perm: ['fabricBooking'] },
+    { to: '/m/fabricReceipt', label: 'Fabric Receipt (Lot / Roll)', icon: 'PackageOpen', perm: ['fabricReceipt'] },
+    { to: '/m/fabricAllocation', label: 'Fabric Allocation', icon: 'Split', perm: ['fabricAllocation'] },
+    { to: '/m/fabricReturn', label: 'Fabric Return / Adjustment', icon: 'RotateCcw', perm: ['fabricReturn'] },
+    { to: '/m/fabricDebit', label: 'Fabric Debit Notes', icon: 'ReceiptText', perm: ['fabricDebit'] },
     { to: '/m/fabricTransfer', label: 'Fabric Transfer', icon: 'ArrowRightLeft', perm: ['fabricTransfer'] },
     { to: '/m/trimBooking', label: 'Trim Booking', icon: 'Tag', perm: ['trimBooking'] },
   ] },
@@ -48,6 +54,7 @@ export const NAV = [
     { to: '/m/invoice', label: 'Invoices / Accounts', icon: 'ReceiptText', perm: ['invoice'] },
     { to: '/m/payment', label: 'Payments', icon: 'Wallet', perm: ['payment'] },
     { to: '/m/expense', label: 'Expenses', icon: 'Coins', perm: ['expense'] },
+    { to: '/m/supplierBill', label: 'Supplier Bills (Payables)', icon: 'Wallet', perm: ['supplierBill'] },
     { to: '/profit', label: 'Profit Analysis', icon: 'TrendingUp', perm: ['profit'] },
   ] },
   { group: 'Insights', items: [

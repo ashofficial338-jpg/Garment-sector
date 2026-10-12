@@ -1,12 +1,17 @@
 /**
- * Sample data tool – replaces old sample / demo TRANSACTIONS with a fresh, realistic, fully connected
- * two-unit dataset, then validates it.
+ * Sample data tool – replaces old sample / test TRANSACTIONS with a fresh, realistic, fully connected
+ * two-unit dataset, then validates it. Every record it creates is flagged `isSampleData` (shown as
+ * "Sample / Test data" in the UI), so a later run removes exactly those records and nothing else.
  *
- *   node src/scripts/sampleData.js            dry run: shows what is there and what would be removed
- *   node src/scripts/sampleData.js --apply    backup → remove transactions → build dataset → validate
+ *   node src/scripts/sampleData.js            dry run: classifies what is there and what would be removed
+ *   node src/scripts/sampleData.js --apply    backup → remove sample transactions → build dataset → validate
+ *   … --apply --include-unflagged             also remove transactions WITHOUT the sample flag – only after the
+ *                                             dry run confirmed they are old sample / test data (e.g. from a
+ *                                             version of this tool that did not flag its records)
  *
  * Never touched: users, sessions, roles & permissions, settings, buyers, suppliers, master data, employees,
- * the audit trail. Before removing anything the transactions are written to server/backups/*.json.
+ * the audit trail, and (without --include-unflagged) any unflagged transaction. Before removing anything,
+ * all transactions are written to server/backups/*.json.
  *
  * The dataset is built through the real API (in-process, as the Admin user), so every hook, calculation,
  * stock-ledger posting, T&A update, audit entry, unit scope and closure rule is exercised exactly as in use.
@@ -30,6 +35,9 @@ import { DocumentFile } from '../models/Document.js';
 import { StockMovement } from '../models/StockMovement.js';
 import { Setting } from '../models/Setting.js';
 import { loadJobGraphs, computeProfit, computeStages } from '../services/lifecycle.js';
+import { num, sum, round } from '../../../shared/calc.js';
+import { TRACKING_LISTS } from '../../../shared/tracking.js';
+import { RETURN_TO_STORE, RETURN_TO_SUPPLIER, ADJUST_SHORT, ADJUST_EXCESS } from '../../../shared/modules/planning.js';
 
 const APPLY = process.argv.includes('--apply');
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -40,16 +48,24 @@ const KEEP_MODULES = MODULE_LIST.filter((d) => d.sharedAcrossUnits || d.key === 
 const TX_MODULES = MODULE_LIST.filter((d) => !KEEP_MODULES.includes(d.key)).map((d) => d.key);
 const TX_EXTRA = { notifications: Notification, documentfiles: DocumentFile, stockmovements: StockMovement };
 
+const INCLUDE_UNFLAGGED = process.argv.includes('--include-unflagged');
+const SAMPLE = { isSampleData: true };
+const UNFLAGGED = { isSampleData: { $ne: true } };
+
 async function inspect() {
-  const counts = {};
-  for (const k of TX_MODULES) counts[k] = await models[k].countDocuments();
+  const counts = {}; const flagged = {}; const unflagged = {};
+  for (const k of TX_MODULES) {
+    counts[k] = await models[k].countDocuments();
+    flagged[k] = await models[k].countDocuments(SAMPLE);
+    unflagged[k] = counts[k] - flagged[k];
+  }
   for (const [k, M] of Object.entries(TX_EXTRA)) counts[k] = await M.countDocuments();
   const keep = {
     users: await User.countDocuments(), roles: await Role.countDocuments(), settings: await Setting.countDocuments(),
     ...Object.fromEntries(await Promise.all(KEEP_MODULES.map(async (k) => [k, await models[k].countDocuments()]))),
   };
-  const jobs = await models.orders.find().select('jobNo businessUnit buyerName styleNo status createdByName createdAt').lean();
-  return { counts, keep, jobs };
+  const jobs = await models.orders.find().select('jobNo businessUnit buyerName styleNo status createdByName createdAt isSampleData').lean();
+  return { counts, flagged, unflagged, keep, jobs };
 }
 
 /* ============================== 2. Backup & clean ============================== */
@@ -64,18 +80,31 @@ async function backupAndClean() {
   fs.writeFileSync(file, JSON.stringify(dump));
   log(`Backup written: ${file} (${(fs.statSync(file).size / 1024).toFixed(0)} KB)`);
 
-  for (const k of TX_MODULES) await models[k].deleteMany({});
-  for (const M of Object.values(TX_EXTRA)) await M.deleteMany({});
+  // only confirmed sample / test data: flagged records (plus unflagged ones when explicitly included)
+  const which = INCLUDE_UNFLAGGED ? {} : SAMPLE;
+  const jobs = dump.orders.filter((j) => INCLUDE_UNFLAGGED || j.isSampleData);
+  const jobIds = jobs.map((j) => j._id); const jobNos = jobs.map((j) => j.jobNo);
+  const removedDocs = INCLUDE_UNFLAGGED ? dump.documentfiles : dump.documentfiles.filter((d) => jobNos.includes(d.jobNo));
+  for (const k of TX_MODULES) await models[k].deleteMany(which);
+  // notifications, documents and stock-ledger lines belong to the removed jobs
+  for (const M of Object.values(TX_EXTRA)) await M.deleteMany(INCLUDE_UNFLAGGED ? {} : { $or: [{ job: { $in: jobIds } }, { jobNo: { $in: jobNos } }] });
   // GridFS files that belonged to removed documents
-  const fileIds = dump.documentfiles.flatMap((d) => (d.versions || []).map((v) => v.fileName)).filter((id) => mongoose.isValidObjectId(id));
+  const fileIds = removedDocs.flatMap((d) => (d.versions || []).map((v) => v.fileName)).filter((id) => mongoose.isValidObjectId(id));
   if (fileIds.length) {
     const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'uploads' });
     for (const id of fileIds) await bucket.delete(new mongoose.Types.ObjectId(id)).catch(() => {});
   }
-  // transaction number series restart (job series U1-1000 / U2-3000); master-data series are kept
-  const keepPrefixes = ['ref-BUY-', 'ref-SUP-', 'ref-EMP-', 'ref-MST-'];
-  await Counter.deleteMany({ _id: { $not: new RegExp(`^(${keepPrefixes.join('|')})`) } });
-  log('Old sample transactions removed (masters, users, roles, settings and audit trail kept).');
+  const left = (await Promise.all(TX_MODULES.map((k) => models[k].countDocuments()))).reduce((a, b) => a + b, 0);
+  if (!left) {
+    // nothing operational left → transaction number series restart (U1-1000 / U2-3000); master-data series are kept
+    const keepPrefixes = ['ref-BUY-', 'ref-SUP-', 'ref-EMP-', 'ref-MST-'];
+    await Counter.deleteMany({ _id: { $not: new RegExp(`^(${keepPrefixes.join('|')})`) } });
+  } else {
+    // live records remain: their numbers stay issued, the series continue after the highest one
+    log(`${left} live (unflagged) transaction(s) kept – job series continue after their numbers.`);
+    await Counter.deleteMany({ $or: [{ _id: /^job-unit-/ }, { _id: { $in: jobNos.map((n) => `sub-${n}`) } }] });
+  }
+  log(`Sample / test transactions removed (${jobs.length} jobs). Masters, users, roles, settings and audit trail kept.`);
 }
 
 /* ============================== 3. API client (in-process, as Admin) ============================== */
@@ -126,7 +155,30 @@ const BUYERS = [
 const SUPPLIERS = [
   { name: 'Pioneer Knit Fabrics', supplierType: 'Fabric' }, { name: 'KPR Mill Ltd', supplierType: 'Fabric' }, { name: 'Arvind Mills', supplierType: 'Fabric' },
   { name: 'Raymond Woven Fabrics', supplierType: 'Fabric' }, { name: 'YKK India', supplierType: 'Trims' }, { name: 'Avery Dennison', supplierType: 'Trims' },
-  { name: 'Maersk Logistics', supplierType: 'Logistics' }, { name: 'SGS Testing', supplierType: 'Testing' },
+  { name: 'Maersk Logistics', supplierType: 'Logistics' }, { name: 'SGS Testing', supplierType: 'Testing Lab' },
+  { name: 'Bright Wash Industries', supplierType: 'Washing' }, { name: 'Colour Print Hub', supplierType: 'Printing' }, { name: 'Stitch Art Embroidery', supplierType: 'Embroidery' },
+  { name: 'Coats Thread India', supplierType: 'Accessories' },
+];
+/** Buyer contacts (filled in only where a buyer has none). */
+const CONTACTS = {
+  'Nordic Apparel AB': [['Elin Berg', 'Senior Buyer'], ['Johan Lind', 'QA Manager']], 'Urban Threads Inc': [['Maria Lopez', 'Sourcing Director'], ['Kevin Shaw', 'Technical Designer']],
+  'Maison Lumière': [['Claire Dubois', 'Buyer'], ['Luc Martin', 'Logistics']], 'Kiwi Kids Ltd': [['Aroha Smith', 'Product Manager']], 'Pacific Coast Apparel LLC': [['Dana Brooks', 'Merchandiser']],
+  'Bristol & Main Ltd': [['Oliver Grant', 'Head of Menswear'], ['Priya Nair', 'Compliance']], 'Sakura Lifestyle KK': [['Yuki Tanaka', 'Buyer'], ['Ken Mori', 'QC']], 'Hamburg Outdoor GmbH': [['Lena Vogel', 'Category Buyer']],
+};
+const STYLES = ['NA-CT-501', 'KK-TS-14', 'ML-PQ-77', 'UT-HD-330', 'NA-LS-610', 'KK-SH-22', 'PCA-TK-08', 'UT-SW-215', 'BM-OX-140', 'SL-CH-205', 'HO-SH-415', 'BM-LT-118', 'SL-BL-090', 'HO-OS-220', 'UT-JG-410', 'SL-DR-301'];
+const MASTER_SAMPLES = [
+  ...STYLES.map((name) => ['Style', name]),
+  ['Costing Template', 'Knit top – basic (fabric KG, CMT, 12% margin)'], ['Costing Template', 'Woven shirt (fabric metre, wash, 12% margin)'], ['Costing Template', 'Bottoms (fabric metre, zip, wash, 11% margin)'],
+  ['Shipment Method', 'Sea – FCL'], ['Shipment Method', 'Sea – LCL'], ['Shipment Method', 'Air freight'], ['Shipment Method', 'Courier (samples)'],
+  ['Expense Category', 'Sewing / CMT'], ['Expense Category', 'Washing'], ['Expense Category', 'Freight'], ['Expense Category', 'Testing'],
+];
+/** Sample employees per unit: [code suffix, name, department, designation, line, grade, operator] */
+const EMPLOYEES = [
+  ['001', 'R. Senthil Kumar', 'CAD / Pattern', 'Pattern Master', '', 'A', false], ['002', 'K. Lakshmi', 'Sewing', 'Line Supervisor', 'Line 1', 'A', false],
+  ['003', 'V. Arun', 'Quality', 'QA Inspector', '', 'A', false], ['004', 'S. Kavitha', 'Sewing', 'Operator – side seam', 'Line 1', 'A', true],
+  ['005', 'M. Revathi', 'Sewing', 'Operator – collar attach', 'Line 2', 'B', true], ['006', 'P. Murugan', 'Cutting', 'Cutting Master', 'Table 1', 'A', false],
+  ['007', 'A. Selvi', 'Finishing', 'Ironing Operator', 'Finishing', 'B', true], ['008', 'D. Ramesh', 'Packing', 'Packing Supervisor', 'Packing', 'B', false],
+  ['009', 'J. Anitha', 'Fabric Department', 'Fabric Store Keeper', 'Store', 'B', false], ['010', 'G. Prakash', 'Production', 'Production Manager', '', 'A', false],
 ];
 const KNIT_TRIMS = [
   { item: 'Main Label', description: 'Woven damask main label', consumptionPerPc: 1, unit: 'Pcs', wastagePct: 3, rate: 0.045 },
@@ -169,13 +221,14 @@ const JOBS = {
   U1: [
     { key: 'U1-MAIN', buyer: 'Nordic Apparel AB', styleNo: 'NA-CT-501', product: "Men's Crew Neck Tee", garmentType: 'T-Shirt', poNo: 'NOR-PO-5120', destination: 'Gothenburg', price: 4.2, qty: 4000, forecast: true,
       fabric: { fabricType: '100% Cotton Single Jersey', composition: '100% Combed Cotton', gsm: 160, width: 60, color: 'Navy', unit: 'Meter', consumption: 1.2, wastagePct: 4, rate: 0.95 },
-      trims: KNIT_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [52, 71, 20, 18], sam: 6.8, orderDays: -75, shipDays: 60,
+      trims: KNIT_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [52, 71, 20, 18], sam: 6.8, orderDays: -100, shipDays: -5, closeMain: true,
       costing: { trimCost: 0.19, accessoriesCost: 0.03, cuttingCost: 0.06, sewingCost: 0.52, finishingCost: 0.1, packingCost: 0.07, labourCost: 0.05, factoryOverhead: 0.18, testingCost: 0.03, freightCost: 0.09, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 },
-      forecastPlan: { supplier: 'Pioneer Knit Fabrics', supplierPoNo: 'PKF/2026/0841', lotNo: 'LOT-SJ-NV-2291', received: 5200, receivedDays: -55 },
+      // 5000 m received = 4700 m to the three call-offs + 300 m inter-unit transfer → fully allocated, forecast closes
+      forecastPlan: { supplier: 'Pioneer Knit Fabrics', supplierPoNo: 'PKF/2026/0841', lotNo: 'LOT-SJ-NV-2291', received: 5000, receivedDays: -82 },
       subJobs: [
-        { qty: 800, fabric: 1000, day: -54, ship: -12, ref: 'NOR-PO-5120 call-off 1', stage: 'closed' },
-        { qty: 2000, fabric: 2500, day: -30, ship: 20, ref: 'NOR-PO-5120 call-off 2', stage: 'sewing' },
-        { qty: 960, fabric: 1200, day: -6, ship: 55, ref: 'NOR-PO-5120 call-off 3', stage: 'planning' },
+        { qty: 800, fabric: 1000, day: -80, ship: -40, ref: 'NOR-PO-5120 call-off 1', poNo: 'NOR-PO-5120-01', color: 'Navy', stage: 'closed' },
+        { qty: 2000, fabric: 2500, day: -62, ship: -20, ref: 'NOR-PO-5120 call-off 2', poNo: 'NOR-PO-5120-02', color: 'Navy', stage: 'closed' },
+        { qty: 960, fabric: 1200, day: -45, ship: -5, ref: 'NOR-PO-5120 call-off 3', poNo: 'NOR-PO-5120-03', color: 'Navy', stage: 'closed' },
       ] },
     { key: 'U1-KIDS-TEE', buyer: 'Kiwi Kids Ltd', styleNo: 'KK-TS-14', product: 'Kids Printed Crew Tee', garmentType: 'T-Shirt', poNo: 'KK-61820', destination: 'Sydney', price: 2.85, qty: 6000, stage: 'closed',
       fabric: { fabricType: 'Single Jersey 160 GSM', composition: '100% Cotton', gsm: 160, width: 66, color: 'Sky Blue', unit: 'KG', consumption: 0.14, wastagePct: 5, rate: 4.6 },
@@ -187,7 +240,7 @@ const JOBS = {
       trims: [...KNIT_TRIMS, { item: 'Button', description: 'Pearl 2-hole 16L', consumptionPerPc: 3, unit: 'Pcs', wastagePct: 4, rate: 0.015 }], sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [48, 66, 18, 17], sam: 11.5, orderDays: -95, shipDays: -6,
       costing: { trimCost: 0.26, cuttingCost: 0.07, sewingCost: 0.95, finishingCost: 0.14, packingCost: 0.08, labourCost: 0.06, factoryOverhead: 0.22, testingCost: 0.04, freightCost: 0.12, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 13 },
       expenses: [['Sewing / CMT', 0.98], ['Finishing', 0.15], ['Packing', 0.08]], payPart: 0.4 },
-    { key: 'U1-HOODIE', buyer: 'Urban Threads Inc', styleNo: 'UT-HD-330', product: 'Unisex Pullover Hoodie', garmentType: 'Hoodie', poNo: 'UTI-91407', destination: 'Los Angeles', price: 11.8, qty: 3500, stage: 'readyToShip',
+    { key: 'U1-HOODIE', countAdjust: { type: ADJUST_SHORT, qty: 2.4 }, buyer: 'Urban Threads Inc', styleNo: 'UT-HD-330', product: 'Unisex Pullover Hoodie', garmentType: 'Hoodie', poNo: 'UTI-91407', destination: 'Los Angeles', price: 11.8, qty: 3500, stage: 'readyToShip',
       fabric: { fabricType: 'French Terry 300 GSM', composition: '80% Cotton 20% Polyester', gsm: 300, width: 72, color: 'Heather Grey', unit: 'KG', consumption: 0.62, wastagePct: 6, rate: 6.1 },
       trims: [...KNIT_TRIMS, { item: 'Drawcord', description: 'Flat cotton drawcord 140 cm with metal tips', consumptionPerPc: 1, unit: 'Pcs', wastagePct: 3, rate: 0.11 }], sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [60, 72, 64, 20], sam: 17.5, orderDays: -70, shipDays: 12,
       costing: { trimCost: 0.31, cuttingCost: 0.12, sewingCost: 1.55, finishingCost: 0.2, washingCost: 0.25, packingCost: 0.1, labourCost: 0.09, factoryOverhead: 0.35, testingCost: 0.05, freightCost: 0.22, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
@@ -203,23 +256,28 @@ const JOBS = {
       fabric: { fabricType: '2x1 Rib 210 GSM', composition: '95% Cotton 5% Elastane', gsm: 210, width: 60, color: 'Black', unit: 'KG', consumption: 0.13, wastagePct: 5, rate: 5.6 },
       trims: KNIT_TRIMS, sizes: ['XS', 'S', 'M', 'L'], ratio: 'XS:2,S:3,M:3,L:2', poms: [42, 58, 0, 16], sam: 4.8, orderDays: -10, shipDays: 95,
       costing: { trimCost: 0.15, cuttingCost: 0.04, sewingCost: 0.33, finishingCost: 0.06, packingCost: 0.05, labourCost: 0.04, factoryOverhead: 0.11, testingCost: 0.03, freightCost: 0.06, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
+    { key: 'U1-SWEAT', qualityHold: true, buyer: 'Urban Threads Inc', styleNo: 'UT-SW-215', product: 'Crew Neck Sweatshirt', garmentType: 'Sweatshirt', poNo: 'UTI-91688', destination: 'Los Angeles', price: 9.2, qty: 3000, stage: 'packingPartial',
+      fabric: { fabricType: 'Brushed Fleece 280 GSM', composition: '80% Cotton 20% Polyester', gsm: 280, width: 72, color: 'Charcoal', unit: 'KG', consumption: 0.52, wastagePct: 6, rate: 5.8 },
+      trims: KNIT_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [58, 70, 62, 19], sam: 14.5, orderDays: -65, shipDays: 9,
+      costing: { trimCost: 0.22, cuttingCost: 0.1, sewingCost: 1.25, finishingCost: 0.16, packingCost: 0.09, labourCost: 0.08, factoryOverhead: 0.3, testingCost: 0.05, freightCost: 0.18, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
   ],
   U2: [
     { key: 'U2-MAIN', buyer: 'Bristol & Main Ltd', styleNo: 'BM-OX-140', product: "Men's Oxford Button-Down Shirt", garmentType: 'Shirt', poNo: 'BM-PO-77310', destination: 'Felixstowe', price: 8.9, qty: 6000, forecast: true,
       fabric: { fabricType: 'Cotton Oxford 40s', composition: '100% Cotton', gsm: 135, width: 58, color: 'Light Blue', unit: 'Meter', consumption: 1.6, wastagePct: 5, rate: 2.75 },
       trims: WOVEN_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [56, 78, 64, 41], sam: 18.5, orderDays: -80, shipDays: 50,
       costing: { trimCost: 0.29, accessoriesCost: 0.11, cuttingCost: 0.1, sewingCost: 1.45, finishingCost: 0.2, washingCost: 0.18, packingCost: 0.09, labourCost: 0.08, factoryOverhead: 0.32, testingCost: 0.05, freightCost: 0.16, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 },
-      forecastPlan: { supplier: 'Arvind Mills', supplierPoNo: 'AM/OX/26-1187', lotNo: 'OX-LB-5531', received: 10000, receivedDays: -58 },
+      forecastPlan: { supplier: 'Arvind Mills', supplierPoNo: 'AM/OX/26-1187', lotNo: 'OX-LB-5531', received: 10400, receivedDays: -58 },
       subJobs: [
-        { qty: 3000, fabric: 5040, day: -56, ship: -8, ref: 'BM-PO-77310 drop 1', stage: 'closed' },
-        { qty: 2000, fabric: 3360, day: -25, ship: 18, ref: 'BM-PO-77310 drop 2', stage: 'quality' },
+        { qty: 3000, fabric: 5040, day: -56, ship: -8, ref: 'BM-PO-77310 drop 1', poNo: 'BM-PO-77310-D1', color: 'Light Blue', stage: 'readyToClose' },
+        { qty: 2000, fabric: 3360, day: -25, ship: 18, ref: 'BM-PO-77310 drop 2', poNo: 'BM-PO-77310-D2', color: 'Light Blue', stage: 'partShipped' },
+        { qty: 1000, fabric: 1700, day: -10, ship: 60, ref: 'BM-PO-77310 drop 3', poNo: 'BM-PO-77310-D3', color: 'Light Blue', stage: 'planning' },
       ] },
     { key: 'U2-CHINO', buyer: 'Sakura Lifestyle KK', styleNo: 'SL-CH-205', product: "Women's Stretch Twill Chino", garmentType: 'Trouser', poNo: 'SLK-24-5582', destination: 'Yokohama', price: 9.4, qty: 4000, stage: 'closed',
       fabric: { fabricType: 'Stretch Cotton Twill 7 oz', composition: '98% Cotton 2% Elastane', gsm: 240, width: 57, color: 'Khaki', unit: 'Meter', consumption: 1.35, wastagePct: 5, rate: 3.4 },
       trims: BOTTOM_TRIMS, sizes: ['26', '28', '30', '32'], ratio: '26:2,28:3,30:3,32:2', poms: [36, 99, 0, 0], sam: 22, orderDays: -120, shipDays: -30,
       costing: { trimCost: 0.42, cuttingCost: 0.12, sewingCost: 1.7, finishingCost: 0.22, washingCost: 0.35, packingCost: 0.1, labourCost: 0.1, factoryOverhead: 0.38, testingCost: 0.06, freightCost: 0.2, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 11 },
       expenses: [['Sewing / CMT', 1.68], ['Washing', 0.36], ['Finishing', 0.22], ['Packing', 0.1]], payFull: true },
-    { key: 'U2-POPLIN', buyer: 'Hamburg Outdoor GmbH', styleNo: 'HO-SH-415', product: "Men's Poplin Short Sleeve Shirt", garmentType: 'Shirt', poNo: 'HOG-4410-26', destination: 'Hamburg', price: 7.1, qty: 3000, stage: 'shipped',
+    { key: 'U2-POPLIN', countAdjust: { type: ADJUST_EXCESS, qty: 3.5 }, buyer: 'Hamburg Outdoor GmbH', styleNo: 'HO-SH-415', product: "Men's Poplin Short Sleeve Shirt", garmentType: 'Shirt', poNo: 'HOG-4410-26', destination: 'Hamburg', price: 7.1, qty: 3000, stage: 'shipped',
       fabric: { fabricType: 'Cotton Poplin 60s', composition: '100% Cotton', gsm: 110, width: 58, color: 'White', unit: 'Meter', consumption: 1.45, wastagePct: 5, rate: 2.4 },
       trims: WOVEN_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [55, 76, 24, 40], sam: 16, orderDays: -85, shipDays: -4,
       costing: { trimCost: 0.27, accessoriesCost: 0.09, cuttingCost: 0.09, sewingCost: 1.25, finishingCost: 0.18, packingCost: 0.08, labourCost: 0.07, factoryOverhead: 0.28, testingCost: 0.05, freightCost: 0.15, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 },
@@ -232,14 +290,51 @@ const JOBS = {
       fabric: { fabricType: 'Viscose Challis 120 GSM', composition: '100% Viscose', gsm: 120, width: 56, color: 'Dusty Rose', unit: 'Meter', consumption: 1.5, wastagePct: 6, rate: 2.9 },
       trims: WOVEN_TRIMS, sizes: ['XS', 'S', 'M', 'L'], ratio: 'XS:2,S:3,M:3,L:2', poms: [50, 64, 60, 36], sam: 19, orderDays: -30, shipDays: 75,
       costing: { trimCost: 0.26, cuttingCost: 0.11, sewingCost: 1.5, finishingCost: 0.2, packingCost: 0.09, labourCost: 0.08, factoryOverhead: 0.3, testingCost: 0.05, freightCost: 0.15, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
-    { key: 'U2-FLANNEL', buyer: 'Hamburg Outdoor GmbH', styleNo: 'HO-OS-220', product: "Men's Flannel Overshirt", garmentType: 'Shirt', poNo: 'HOG-4488-26', destination: 'Hamburg', price: 14.5, qty: 2200, stage: 'planning',
+    { key: 'U2-FLANNEL', hold: 'Capacity – sewing lines 3 and 4 booked until next month', buyer: 'Hamburg Outdoor GmbH', styleNo: 'HO-OS-220', product: "Men's Flannel Overshirt", garmentType: 'Shirt', poNo: 'HOG-4488-26', destination: 'Hamburg', price: 14.5, qty: 2200, stage: 'planning',
       fabric: { fabricType: 'Brushed Cotton Flannel', composition: '100% Cotton', gsm: 190, width: 58, color: 'Red Check', unit: 'Meter', consumption: 1.9, wastagePct: 7, rate: 3.6 },
       trims: WOVEN_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [60, 79, 66, 43], sam: 26, orderDays: -12, shipDays: 100,
       costing: { trimCost: 0.34, accessoriesCost: 0.12, cuttingCost: 0.14, sewingCost: 2.1, finishingCost: 0.26, washingCost: 0.2, packingCost: 0.11, labourCost: 0.11, factoryOverhead: 0.45, testingCost: 0.06, freightCost: 0.24, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 13 } },
   ],
 };
 
-const STAGES = ['planning', 'fabricPending', 'fabric', 'cutting', 'sewing', 'quality', 'packing', 'readyToShip', 'shipped', 'accountsPending', 'closed'];
+/**
+ * Repeat buyers place the same style again: an ADVANCE job is opened from the new costing / quotation before
+ * the buyer PO exists (PO Status "Awaiting PO" – not a confirmed order). Forecast advance jobs are split into
+ * sub jobs; a call-off PO that has arrived is linked to its sub job through a New Order (buyer PO) record.
+ */
+const nextMonth = (n) => { const d = new Date(TODAY); d.setMonth(d.getMonth() + n); return d.toISOString().slice(0, 7); };
+const ADVANCE = {
+  U1: [
+    { key: 'U1-ADV-NOR', advance: true, forecast: true, repeatOf: 'U1-MAIN', buyer: 'Nordic Apparel AB', styleNo: 'NA-CT-501', product: "Men's Crew Neck Tee", garmentType: 'T-Shirt', destination: 'Gothenburg', price: 4.25, qty: 3600,
+      expectedOrderMonth: nextMonth(1), fabricOf: 'U1-MAIN', orderDays: -6, shipDays: 75,
+      subJobs: [
+        { qty: 1200, ship: 45, stage: 'fabricPending', callOff: { poNo: 'NOR-PO-5302-01', orderDays: -3, color: 'Navy' } },
+        { qty: 1200, ship: 75, stage: 'planning' },
+        { qty: 1200, ship: 105 },
+      ] },
+  ],
+  U2: [
+    { key: 'U2-ADV-BM', advance: true, forecast: true, repeatOf: 'U2-MAIN', buyer: 'Bristol & Main Ltd', styleNo: 'BM-OX-140', product: "Men's Oxford Button-Down Shirt", garmentType: 'Shirt', destination: 'Felixstowe', price: 8.95, qty: 4800,
+      expectedOrderMonth: nextMonth(1), fabricOf: 'U2-MAIN', orderDays: -5, shipDays: 90,
+      // the first call-off PO has arrived (New Orders) but is not linked yet → "Orders awaiting job creation"
+      subJobs: [{ qty: 2400, ship: 60, stage: 'planning', pendingPo: { poNo: 'BM-PO-78015-01', orderDays: -1, color: 'Light Blue' } }, { qty: 2400, ship: 95 }] },
+    { key: 'U2-ADV-SLK', advance: true, repeatOf: 'U2-CHINO', buyer: 'Sakura Lifestyle KK', styleNo: 'SL-CH-205', product: "Women's Stretch Twill Chino", garmentType: 'Trouser', destination: 'Yokohama', price: 9.5, qty: 3000,
+      expectedOrderMonth: nextMonth(2), fabricOf: 'U2-CHINO', orderDays: -4, shipDays: 110, stage: 'planning' },
+  ],
+};
+/** Buyer POs received and not yet converted into jobs (New Orders / Orders awaiting job creation). */
+const NEW_ORDERS = {
+  U1: [
+    { orderType: 'Repeat Order', repeatOf: 'U1-TANK', buyer: 'Pacific Coast Apparel LLC', poNo: 'PCA-PO-31206', styleNo: 'PCA-TK-08', product: "Women's Rib Tank Top", garmentType: 'T-Shirt', orderDays: -2, deliveryDays: 115, qty: 6500, unitPrice: 3.15, color: 'Black', sizeRatio: 'XS:2,S:3,M:3,L:2', destination: 'Long Beach' },
+    { orderType: 'New Order', buyer: 'Urban Threads Inc', poNo: 'UTI-92011', styleNo: 'UT-JG-410', product: 'Fleece Jogger', garmentType: 'Trouser', orderDays: -1, deliveryDays: 120, qty: 4200, unitPrice: 9.6, color: 'Black', sizeRatio: RATIO_ADULT, destination: 'Los Angeles', review: true },
+  ],
+  U2: [
+    { orderType: 'Repeat Order', repeatOf: 'U2-POPLIN', buyer: 'Hamburg Outdoor GmbH', poNo: 'HOG-4521-26', styleNo: 'HO-SH-415', product: "Men's Poplin Short Sleeve Shirt", garmentType: 'Shirt', orderDays: -3, deliveryDays: 105, qty: 3500, unitPrice: 7.1, color: 'White', sizeRatio: RATIO_ADULT, destination: 'Hamburg' },
+    { orderType: 'New Order', buyer: 'Sakura Lifestyle KK', poNo: 'SLK-24-5802', styleNo: 'SL-DR-301', product: "Women's Shirt Dress", garmentType: 'Dress', orderDays: -1, deliveryDays: 125, qty: 2400, unitPrice: 12.4, color: 'Sage', sizeRatio: 'XS:2,S:3,M:3,L:2', destination: 'Yokohama', review: true },
+  ],
+};
+
+const STAGES = ['planning', 'fabricPending', 'fabric', 'cutting', 'sewing', 'quality', 'packingPartial', 'packing', 'readyToShip', 'partShipped', 'shipped', 'accountsPending', 'readyToClose', 'closed'];
 const reach = (target, s) => STAGES.indexOf(target) >= STAGES.indexOf(s);
 
 /* --------------------------- commercial chain: enquiry → costing → quotation → order --------------------------- */
@@ -248,20 +343,99 @@ async function confirmOrder(api, spec, ids) {
   const enq = await api.post('/m/enquiry', { enquiryDate: day(spec.orderDays - 20), buyer: ids.buyers[spec.buyer], buyerContact: 'Sourcing team', styleNo: spec.styleNo, product: spec.product, garmentType: spec.garmentType, fabric: f.fabricType, composition: f.composition, gsm: f.gsm, color: f.color, sizeRange: spec.sizes.join(', '), expectedQty: spec.qty, targetPrice: spec.price, currency: 'USD', requiredDelivery: day(spec.shipDays) });
   await api.status('enquiry', enq._id, 'Under Review');
   // FOB price = the cost sheet's total cost + margin (the buyer's target price is only the enquiry's target)
-  const cst = await api.post('/m/costing', { enquiry: enq._id, fabricConsumption: f.consumption, fabricUnit: f.unit, fabricRate: f.rate, fabricWastagePct: f.wastagePct, ...spec.costing });
+  const cst = await api.post('/m/costing', { enquiry: enq._id, costingDate: day(spec.orderDays - 16), fabricConsumption: f.consumption, fabricUnit: f.unit, fabricRate: f.rate, fabricWastagePct: f.wastagePct, ...spec.costing });
   await api.status('costing', cst._id, 'Submitted', 'Under Review', 'Approved');
   const qtn = await api.post('/m/quotation', { costing: cst._id, quoteDate: day(spec.orderDays - 12), fabric: f.fabricType, composition: f.composition, gsm: f.gsm, color: f.color, sizeRange: spec.sizes.join(', '), paymentTerms: BUYERS.find((b) => b.name === spec.buyer).paymentTerms, deliveryTerms: 'FOB', validUntil: day(spec.orderDays + 30) });
   await api.status('quotation', qtn._id, 'Sent', 'Under Review', 'Approved');
-  const per = Math.round(spec.qty / 10);
   const ratio = spec.ratio.split(',').map((p) => { const [s, q] = p.split(':'); return [s, Number(q)]; });
-  const job = await api.post(`/jobs/from-quotation/${qtn._id}`, {
-    poNo: spec.poNo, orderDate: day(spec.orderDays), shipmentDate: day(spec.shipDays), deliveryDate: day(spec.shipDays + 21), destination: spec.destination,
-    orderQty: spec.qty, colors: [f.color], sizes: spec.sizes, sizeBreakdown: ratio.map(([size, q]) => ({ color: f.color, size, qty: per * q })),
+  const per = spec.qty / ratio.reduce((t, [, q]) => t + q, 0);
+  const order = {
+    orderDate: day(spec.orderDays), shipmentDate: day(spec.shipDays), deliveryDate: day(spec.shipDays + 21), destination: spec.destination,
+    orderQty: spec.qty, colors: [f.color], sizes: spec.sizes, sizeBreakdown: ratio.map(([size, q]) => ({ color: f.color, size, qty: Math.round(per * q) })),
     fabricType: f.fabricType, composition: f.composition, gsm: f.gsm, width: f.width, fabricColor: f.color, consumption: f.consumption, consumptionUnit: f.unit,
-    wastagePct: f.wastagePct, fabricRate: f.rate, trims: spec.trims, specialInstructions: `${spec.product} – buyer ${spec.buyer}. Shade band approval before bulk cutting.`,
+    wastagePct: f.wastagePct, fabricRate: f.rate, trims: spec.trims, specialInstructions: `${spec.product} – buyer ${spec.buyer}. Shade band approval before bulk cutting. [Sample / Test data]`,
     ...(spec.forecast ? { isForecast: true, forecastQty: spec.qty } : {}),
+    ...(spec.repeatOfJobNo ? { repeatOfJobNo: spec.repeatOfJobNo } : {}),
+  };
+  // advance job for a repeat / forecast order: opened from the quotation before the buyer PO exists
+  if (spec.advance) return api.post(`/jobs/from-quotation/${qtn._id}`, { ...order, poStatus: 'Awaiting PO', expectedOrderMonth: spec.expectedOrderMonth });
+  // confirmed order: the buyer PO is registered (New Orders) and converted into the job
+  const bo = await api.post('/m/buyerOrder', {
+    orderType: spec.repeatOfJobNo ? 'Repeat Order' : 'New Order', buyer: ids.buyers[spec.buyer], poNo: spec.poNo, styleNo: spec.styleNo, product: spec.product, garmentType: spec.garmentType,
+    orderDate: order.orderDate, deliveryDate: order.deliveryDate, shipmentDate: order.shipmentDate, orderQty: spec.qty, unitPrice: qtn.price, currency: 'USD',
+    color: f.color, sizeRatio: spec.ratio, destination: spec.destination, quotation: qtn._id, repeatOfJobNo: spec.repeatOfJobNo, remarks: 'Sample / Test data',
   });
-  return job;
+  await api.status('buyerOrder', bo._id, 'Under Review');
+  return api.post(`/jobs/from-buyer-order/${bo._id}`, order);
+}
+
+/* --------------------------- fabric transactions (roll-wise) --------------------------- */
+/**
+ * Fabric inward in two supplier deliveries: rolls of ~25 kg / 100 m with 4-point inspection, plus one extra roll that
+ * fails inspection. Returns the passed rolls (for issue) and the failed one (for the return to the supplier).
+ */
+async function fabricInward(api, jobNo, against, qty, f, lots, d0, counters) {
+  const size = f.unit === 'KG' ? 25 : 100;
+  const n = Math.max(1, Math.ceil(qty / size));
+  const split = Math.ceil(n * 0.6);
+  const rolls = Array.from({ length: n }, (_, i) => ({
+    rollNo: `R${String(i + 1).padStart(3, '0')}`, lotNo: lots[i < split ? 0 : 1], shade: i < split ? 'A' : 'B', width: f.width, gsm: f.gsm,
+    qty: i < n - 1 ? size : r2(qty - size * (n - 1)), points: 6 + ((i * 7) % 15), result: 'Pass',
+  }));
+  const bad = { rollNo: `R${String(n + 1).padStart(3, '0')}`, lotNo: lots[1], shade: 'B', width: f.width, gsm: f.gsm, qty: f.unit === 'KG' ? 18.5 : 64, points: f.unit === 'KG' ? 52 : 75, result: 'Fail' };
+  for (const [i, part] of [rolls.slice(0, split), [...rolls.slice(split), bad]].entries()) {
+    const rc = await api.post('/m/fabricReceipt', { job: jobNo, ...against, receiptDate: day(d0 + i * 3), supplierDc: `DC/${lots[i]}/${counters.dc++}`, vehicleNo: `TN 38 AB ${4100 + counters.dc}`, rolls: part, remarks: i ? `Roll ${bad.rollNo} failed 4-point inspection` : '' });
+    await api.status('fabricReceipt', rc._id, 'Inspected', 'Approved');
+  }
+  return { passed: rolls.map((r) => ({ rollNo: r.rollNo, left: r.qty })), rejected: bad };
+}
+
+/** The failed roll goes back to the supplier; the fabric department raises a supplier debit note for it (+ return freight). */
+async function rejectedRollBack(api, jobNo, against, bad, d0, settle, counters) {
+  const ret = await api.post('/m/fabricReturn', { job: jobNo, ...against, returnType: RETURN_TO_SUPPLIER, returnDate: day(d0), referenceDoc: `RC/${jobNo}/${counters.dc++}`, rollNos: `${bad.rollNo} (lot ${bad.lotNo})`, qty: bad.qty, reason: 'Failed 4-point inspection – returned for credit' });
+  await api.status('fabricReturn', ret._id, 'Accepted');
+  const dn = await api.post('/m/fabricDebit', { job: jobNo, ...against, fabricReturn: ret._id, debitDate: day(d0 + 1), debitTo: 'Supplier', reason: 'Rejected fabric (4-point inspection)', otherCharges: 12.5, remarks: 'Roll value + return freight' });
+  if (!settle) return { dn, setOff: 0 };
+  await api.status('fabricDebit', dn._id, 'Accepted');
+  if (settle === 'Adjusted') {
+    await api.put(`/m/fabricDebit/${dn._id}`, { referenceDoc: `CN-${counters.dc++} (supplier credit note, adjusted against the fabric bill)` });
+    await api.status('fabricDebit', dn._id, 'Adjusted');
+  }
+  return { dn, setOff: settle === 'Adjusted' ? dn.amount : 0 };
+}
+
+/**
+ * Supplier bill (accounts payable) with debit notes set off and payments: pay 'full' / 'half' / null.
+ * The payable only – the job cost is already recognised at receipt or as a job expense.
+ */
+async function supplierBill(api, jobNo, b, counters) {
+  const bill = await api.post('/m/supplierBill', {
+    job: jobNo || undefined, supplier: b.supplier, billNo: b.billNo, billDate: day(b.day), dueDate: day(b.day + (b.terms || 45)), billType: b.billType, fabricBooking: b.fabricBooking,
+    poRef: b.poRef, description: b.description, qty: b.qty, unit: b.unit, rate: b.rate, taxPct: b.taxPct ?? 5, debitNoteAdjusted: b.setOff || 0, debitNoteRefs: b.setOffRefs || '', remarks: 'Sample / Test data',
+  });
+  const due = r2(bill.totalAmount - num(b.setOff));
+  const amount = b.pay === 'full' ? due : b.pay === 'half' ? r2(due / 2) : 0;
+  if (amount > 0) await api.put(`/m/supplierBill/${bill._id}`, { payments: [{ date: day(Math.min(b.day + (b.pay === 'full' ? 30 : 15), 0)), mode: 'Bank transfer', reference: `NEFT/${counters.bill++}`, amount }] });
+  await api.status('supplierBill', bill._id, 'Verified', ...(amount > 0 ? ['Approved'] : []));
+  return bill;
+}
+
+/** Issue fabric to cutting in two allocations, roll by roll (or by transfer lot), up to `qty`. */
+async function issueRolls(api, jobNo, bookingId, rolls, qty, d0, counters) {
+  const parts = [[], []];
+  let need = r2(qty);
+  for (const r of rolls) {
+    if (need <= 0.0005) break;
+    const take = r2(Math.min(r.left, need));
+    if (take <= 0) continue;
+    r.left = r2(r.left - take); need = r2(need - take);
+    parts[r2(qty - need) > qty * 0.6 && parts[0].length ? 1 : 0].push({ rollNo: r.rollNo, qty: take });
+  }
+  for (const [i, part] of parts.entries()) {
+    if (!part.length) continue;
+    const a = await api.post('/m/fabricAllocation', { job: jobNo, booking: bookingId, allocationDate: day(d0 + i * 2), cuttingTable: `Table ${(counters.line % 4) + 1}`, rolls: part, remarks: `Issue slip IS-${counters.dc++}` });
+    await api.status('fabricAllocation', a._id, 'Issued to Cutting');
+  }
 }
 
 /* --------------------------- one job through the workflow up to its target stage --------------------------- */
@@ -274,18 +448,19 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
   const start = spec.orderDays;
   const ps = Math.min(start + 26, -14);
   // specification
-  const spc = await api.put(`/m/techSpec/${t.records.techSpec[0]._id}`, { fit: 'Regular fit', baseSize: spec.sizes[1], sizes: spec.sizes, description: `${spec.product}, ${f.composition}`, construction: 'Overlock 4-thread seams, coverstitch hems, taped shoulders', stitching: '12–14 SPI lockstitch, 4-thread overlock', labelling: 'Main label centre back neck, care label left side seam 10 cm above hem', packingInstructions: 'Single piece folded in polybag, solid colour assorted size cartons', measurements: spec.poms.filter((v) => v > 0).length ? POMS(spec.poms).filter((p) => p.baseValue > 0) : [] });
+  const spc = await api.put(`/m/techSpec/${t.records.techSpec[0]._id}`, { specDate: day(start + 1), buyerApprovalDate: day(start + 4), fit: 'Regular fit', baseSize: spec.sizes[1], sizes: spec.sizes, description: `${spec.product}, ${f.composition}`, construction: 'Overlock 4-thread seams, coverstitch hems, taped shoulders', stitching: '12–14 SPI lockstitch, 4-thread overlock', labelling: 'Main label centre back neck, care label left side seam 10 cm above hem', packingInstructions: 'Single piece folded in polybag, solid colour assorted size cartons', measurements: spec.poms.filter((v) => v > 0).length ? POMS(spec.poms).filter((p) => p.baseValue > 0) : [] });
   if (target === 'planning') { await api.status('techSpec', spc._id, 'Submitted'); return; }
   await api.status('techSpec', spc._id, 'Submitted', 'Approved');
   // BOM
   const bom = t.records.bom[0];
+  await api.put(`/m/bom/${bom._id}`, { bomDate: day(start + 2) });
   await api.status('bom', bom._id, 'Submitted', 'Approved');
   // CAD → pattern → grading → marker
-  const pat = await api.post('/m/pattern', { job: jobNo, patternNo: `${spec.styleNo}-P1`, cadSystem: unit === 'U1' ? 'Gerber AccuMark' : 'Lectra Modaris', cadFileName: `${spec.styleNo}_prod_v1.zip`, patternMaker: unit === 'U1' ? 'R. Senthil Kumar' : 'M. Priya', pieceCount: 7, seamAllowanceMm: 10, cadStartDate: day(start) });
+  const pat = await api.post('/m/pattern', { job: jobNo, patternNo: `${spec.styleNo}-P1`, cadSystem: unit === 'U1' ? 'Gerber AccuMark' : 'Lectra Modaris', cadFileName: `${spec.styleNo}_prod_v1.zip`, patternMaker: unit === 'U1' ? 'R. Senthil Kumar' : 'M. Priya', pieceCount: 7, seamAllowanceMm: 10, cadStartDate: day(start), approvalDate: day(start + 6) });
   await api.status('pattern', pat._id, 'Pattern Ready', 'Pattern Approved', 'Graded');
   const pcsPerMarker = spec.ratio.split(',').reduce((a, p) => a + Number(p.split(':')[1]), 0);
   const markerLength = f.unit === 'KG' ? r2((f.consumption * 0.985 * pcsPerMarker * 1000) / (f.width * 0.0254 * f.gsm)) : r2(f.consumption * 0.985 * pcsPerMarker);
-  const mk = await api.post('/m/marker', { job: jobNo, markerNo: `${spec.styleNo}-MK1`, ratio: spec.ratio, markerLength, markerLengthUnit: 'Meter', markerWidth: f.width, gsm: f.gsm, unit: f.unit, fabricType: f.fabricType, color: f.color, markerEfficiencyPct: 84 + (pcsPerMarker % 3), plannedPlies: Math.ceil(qty / pcsPerMarker) });
+  const mk = await api.post('/m/marker', { job: jobNo, markerDate: day(start + 8), markerNo: `${spec.styleNo}-MK1`, ratio: spec.ratio, markerLength, markerLengthUnit: 'Meter', markerWidth: f.width, gsm: f.gsm, unit: f.unit, fabricType: f.fabricType, color: f.color, markerEfficiencyPct: 84 + (pcsPerMarker % 3), plannedPlies: Math.ceil(qty / pcsPerMarker) });
   await api.status('marker', mk._id, 'Submitted', 'Approved');
   // samples, PP meeting, plan
   for (const s of t.records.sample) await api.status('sample', s._id, 'Submitted', 'Buyer Review', 'Approved');
@@ -295,24 +470,48 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
   const line = `Line ${(counters.line++ % 6) + 1}`;
   await api.put(`/m/productionPlan/${plan._id}`, { floor: 'Floor 1', line, operators, helpers: Math.round(operators / 4), machines: operators + 4, sam: spec.sam, workingMinutes: 480, targetEfficiencyPct: 62, plannedStart: day(ps) });
   await api.status('productionPlan', plan._id, 'Approved', 'Released');
-  // fabric booking (sub jobs already received theirs by transfer)
+  // fabric: purchase order → roll-wise inward with 4-point inspection → the failed roll back to the supplier with a
+  // debit note. Sub jobs received theirs by transfer from the main job forecast (the transfer lot is issued like a roll).
   t = await api.get(`/jobs/track/${jobNo}`);
+  const store = {}; // booking id → rolls / transfer lots with the quantity still in store
+  const settle = reach(target, 'readyToClose') ? 'Adjusted' : reach(target, 'sewing') ? 'Accepted' : null;
   for (const fb of t.records.fabricBooking) {
     const full = await api.get(`/m/fabricBooking/${fb._id}`);
     const req = full.requiredQty;
     const byTransfer = full.receivedQty > 0;
-    const received = byTransfer ? full.receivedQty : target === 'fabricPending' ? 0 : r2(req * (spec.partialFabric || 1.012));
+    const received = byTransfer ? full.receivedQty : r2(req * (spec.partialFabric || 1.012));
     const body = { supplier: ids.suppliers[unit === 'U1' ? 'KPR Mill Ltd' : 'Raymond Woven Fabrics'], supplierPoNo: `${unit}-FPO-${jobNo.split('-').slice(1).join('')}`, bookingDate: day(start + 2), deliveryDate: day(start + 20), bookedQty: byTransfer ? received : Math.ceil(req), rate: f.rate };
-    if (target === 'fabricPending') { await api.put(`/m/fabricBooking/${fb._id}`, body); await api.status('fabricBooking', fb._id, 'Booked', 'In Production'); continue; }
-    // a few metres / kg rejected at 4-point inspection, never below the requirement
-    await api.put(`/m/fabricBooking/${fb._id}`, { ...body, receivedQty: received, inspectedQty: received, approvedQty: r2(Math.min(received, Math.max(req, received * 0.996))) });
-    await api.status('fabricBooking', fb._id, ...(byTransfer ? ['Inspected', 'Approved'] : ['Booked', 'In Production', 'In Transit', 'Received', 'Inspected', 'Approved']));
+    if (byTransfer) {
+      await api.put(`/m/fabricBooking/${fb._id}`, { ...body, inspectedQty: received, approvedQty: received });
+      await api.status('fabricBooking', fb._id, 'Inspected', 'Approved');
+      store[fb._id] = t.records.fabricTransfer.filter((x) => x.toJobNo === jobNo && x.status === 'Completed').map((x) => ({ rollNo: x.refNo, left: x.qty }));
+      continue;
+    }
+    await api.put(`/m/fabricBooking/${fb._id}`, body);
+    await api.status('fabricBooking', fb._id, 'Booked', 'In Production');
+    if (target === 'fabricPending') continue;
+    await api.status('fabricBooking', fb._id, 'In Transit');
+    const tag = jobNo.split('-').slice(1).join('');
+    const inward = await fabricInward(api, jobNo, { booking: fb._id }, received, f, [`${unit}-L${tag}A`, `${unit}-L${tag}B`], start + 15, counters);
+    store[fb._id] = inward.passed;
+    const back = await rejectedRollBack(api, jobNo, { booking: fb._id }, inward.rejected, start + 21, settle, counters);
+    await supplierBill(api, jobNo, { supplier: body.supplier, billNo: `${unit === 'U1' ? 'KPR' : 'RWF'}/INV/${jobNo.split('-').slice(1).join('')}`, day: start + 19, billType: 'Fabric', fabricBooking: fb._id, poRef: body.supplierPoNo,
+      description: `${f.fabricType} ${f.color} – ${received} + rejected roll ${inward.rejected.qty} ${f.unit}`, qty: r2(received + inward.rejected.qty), unit: f.unit, rate: f.rate, setOff: back.setOff, setOffRefs: back.setOff ? back.dn.refNo : '',
+      pay: settle === 'Adjusted' ? 'full' : settle ? 'half' : null }, counters);
   }
+  const trimBills = {};
   for (const tb of t.records.trimBooking) {
     const full = await api.get(`/m/trimBooking/${tb._id}`);
+    const trimSupplier = ['Button', 'Zipper'].includes(full.item) ? 'YKK India' : 'Avery Dennison';
+    if (target !== 'fabricPending') (trimBills[trimSupplier] ||= []).push(full);
     const rcv = target === 'fabricPending' ? 0 : full.bookingQty;
-    await api.put(`/m/trimBooking/${tb._id}`, { supplier: ids.suppliers[['Button', 'Zipper'].includes(full.item) ? 'YKK India' : 'Avery Dennison'], supplierPoNo: `${unit}-TPO-${jobNo.split('-').slice(1).join('')}`, deliveryDate: day(start + 18), bookedQty: full.bookingQty, receivedQty: rcv, issuedQty: reach(target, 'cutting') ? rcv : 0, usedQty: target === 'closed' ? rcv : 0 });
+    await api.put(`/m/trimBooking/${tb._id}`, { supplier: ids.suppliers[['Button', 'Zipper'].includes(full.item) ? 'YKK India' : 'Avery Dennison'], supplierPoNo: `${unit}-TPO-${jobNo.split('-').slice(1).join('')}`, bookingDate: day(start + 3), deliveryDate: day(start + 18), bookedQty: full.bookingQty, receivedQty: rcv, issuedQty: reach(target, 'cutting') ? rcv : 0, usedQty: reach(target, 'readyToClose') ? rcv : 0 });
     await api.status('trimBooking', tb._id, ...(target === 'fabricPending' ? ['Booked'] : ['Booked', 'In Transit', 'Received', ...(reach(target, 'cutting') ? ['Issued'] : [])]));
+  }
+  for (const [name, items] of Object.entries(trimBills)) {
+    await supplierBill(api, jobNo, { supplier: ids.suppliers[name], billNo: `${name === 'YKK India' ? 'YKK' : 'AVD'}/${jobNo.split('-').slice(1).join('')}`, day: start + 18, billType: 'Trims / Accessories', poRef: `${unit}-TPO-${jobNo.split('-').slice(1).join('')}`,
+      description: items.map((x) => `${x.item} ${x.bookingQty} ${x.unit}`).join(', '), qty: 1, unit: 'Lot', rate: r2(items.reduce((s, x) => s + num(x.bookingQty) * num(x.rate), 0)), taxPct: 12,
+      pay: reach(target, 'readyToClose') ? 'full' : reach(target, 'sewing') ? 'half' : null }, counters);
   }
   if (target === 'fabricPending') return;
   // cutting (approved marker → lay data pulled), fabric issued to cutting
@@ -320,8 +519,8 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
   const main = await api.get(`/m/fabricBooking/${fabs[0]._id}`);
   const cutTarget = target === 'cutting' ? Math.round(qty * 0.55) : Math.round(qty * 1.015);
   const issue = r2(Math.min(main.approvedQty, cutTarget * f.consumption * (1 + f.wastagePct / 100)));
-  await api.put(`/m/fabricBooking/${main._id}`, { issuedQty: issue });
-  await api.status('fabricBooking', main._id, 'Issued');
+  // fabric issued roll-wise (or by transfer lot) to the cutting tables
+  await issueRolls(api, jobNo, main._id, store[main._id] || [], issue, ps, counters);
   // lays of up to a third of the order; fabric used per lay in proportion, total always within the fabric issued
   const maxPlies = Math.ceil(qty / pcsPerMarker / 3) + 1;
   let cut = 0; let lay = 1;
@@ -333,6 +532,31 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
     cut += pcs; lay += 1;
   }
   if (target === 'cutting') return;
+  // unused end pieces back from cutting to the fabric store (never below the requirement), and the fabric
+  // department's debits for the job: accountability for excess wastage / an additional re-processing charge
+  const after = await api.get(`/m/fabricBooking/${main._id}`);
+  const usedInCutting = r2(issue * 0.985);
+  const back = r2(Math.min((issue - usedInCutting) * 0.5, after.netIssuedQty - after.requiredQty));
+  if (back > 0.05) {
+    const ret = await api.post('/m/fabricReturn', { job: jobNo, booking: main._id, returnType: RETURN_TO_STORE, returnDate: day(ps + lay), referenceDoc: `GP/CUT/${unit}/${counters.dc++}`, rollNos: 'End bits / short lengths after the final lay', qty: back, reason: 'Unused fabric returned after cutting completed' });
+    await api.status('fabricReturn', ret._id, 'Accepted');
+  }
+  if (spec.countAdjust) {
+    // physical stock count in the fabric store: difference posted as a stock adjustment
+    const now = await api.get(`/m/fabricBooking/${main._id}`);
+    const adjQty = r2(spec.countAdjust.type === ADJUST_SHORT ? Math.min(spec.countAdjust.qty, now.balanceQty) : spec.countAdjust.qty);
+    if (adjQty > 0) {
+      const adj = await api.post('/m/fabricReturn', { job: jobNo, booking: main._id, returnType: spec.countAdjust.type, returnDate: day(ps + lay + 1), referenceDoc: `CNT/${unit}/${counters.dc++}`, rollNos: 'Store count – end bits rack', qty: adjQty, reason: spec.countAdjust.type === ADJUST_SHORT ? 'Physical count below book stock (end-bit wastage)' : 'Physical count above book stock (roll length over-run)' });
+      await api.status('fabricReturn', adj._id, 'Accepted');
+    }
+  }
+  const kind = counters.debitKind++ % 3;
+  if (kind < 2) {
+    const dn = await api.post('/m/fabricDebit', kind === 0
+      ? { job: jobNo, booking: main._id, debitDate: day(ps + lay), debitTo: 'Department – accountability', debitParty: 'Cutting', reason: 'Excess cutting wastage', qty: r2(issue * 0.004), remarks: 'End-loss above marker allowance on lays L-01/L-02 – recorded against Cutting' }
+      : { job: jobNo, booking: main._id, debitDate: day(ps + lay), debitTo: 'Job – additional charge', reason: 'Re-processing / re-dyeing charges', qty: r2(issue * 0.06), rate: f.unit === 'KG' ? 0.42 : 0.08, remarks: 'Re-compacting of shrinkage-failed rolls before cutting' });
+    await api.status('fabricDebit', dn._id, 'Accepted');
+  }
   // sewing – line output day by day at realistic efficiency
   const sewTarget = target === 'sewing' ? Math.round(cut * 0.45) : cut - Math.round(cut * 0.005);
   let sewn = 0; let d = ps + lay + 1;
@@ -350,14 +574,43 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
   await api.post('/m/finishing', { job: jobNo, entryDate: day(d + 1), process: 'All', color: f.color, inputQty: finIn, passedQty: finIn - rej, alteration: Math.round(finIn * 0.01), rework: Math.round(finIn * 0.006), rejection: rej });
   const inl = await api.post('/m/inspection', { job: jobNo, inspectionDate: day(d), inspectionType: 'Inline', inspector: unit === 'U1' ? 'QA – V. Arun' : 'QA – D. Meena', inspectionAgency: 'In-house QA', lotSize: Math.round(sewn / 2), majorDefects: 2, minorDefects: 5 });
   await api.status('inspection', inl._id, 'Inspection');
+  if (spec.qualityHold) {
+    const el = await api.post('/m/inspection', { job: jobNo, inspectionDate: day(Math.min(d + 1, 0)), inspectionType: 'End-line', inspector: 'QA – V. Arun', inspectionAgency: 'In-house QA', lotSize: 315, majorDefects: 14, minorDefects: 19, remarks: 'Open seams at side panel – line stopped for re-training, re-inspection pending' });
+    await api.status('inspection', el._id, 'Inspection', 'Failed');
+  }
   if (target === 'quality') return;
   // packing – full cartons, never more than ordered
   const ppc = pcsPerMarker * 3;
-  const cartons = Math.floor(Math.min(finIn - rej, qty) / ppc);
-  const pk = await api.post('/m/packing', { job: jobNo, packingDate: day(d + 2), packingMethod: 'Solid Color Assorted Size', rows: [{ color: f.color, ratio: spec.ratio.split(',').map((p) => { const [s, q] = p.split(':'); return `${s}:${Number(q) * 3}`; }).join(','), cartonFrom: 1, cartonTo: cartons, pcsPerCarton: ppc, netWtPerCarton: r2(ppc * (f.unit === 'KG' ? f.consumption : 0.2)), grossWtPerCarton: r2(ppc * (f.unit === 'KG' ? f.consumption : 0.2) + 1.1), length: 60, width: 40, height: 30 }] });
-  await api.status('packing', pk._id, 'Packed', 'Verified');
-  const fin = await api.post('/m/inspection', { job: jobNo, inspectionDate: day(d + 3), inspectionType: 'Final', inspector: 'Buyer QA', inspectionAgency: `${spec.buyer} QA`, lotSize: pk.totalQty, majorDefects: 3, minorDefects: 6 });
-  await api.status('inspection', fin._id, 'Inspection', 'Passed', 'Final Approved');
+  const fullCartons = Math.floor(Math.min(finIn - rej, qty) / ppc);
+  const pack = async (from, to, dd) => {
+    const p = await api.post('/m/packing', { job: jobNo, packingDate: day(dd), packingMethod: 'Solid Color Assorted Size', rows: [{ color: f.color, ratio: spec.ratio.split(',').map((x) => { const [s, q] = x.split(':'); return `${s}:${Number(q) * 3}`; }).join(','), cartonFrom: from, cartonTo: to, pcsPerCarton: ppc, netWtPerCarton: r2(ppc * (f.unit === 'KG' ? f.consumption : 0.2)), grossWtPerCarton: r2(ppc * (f.unit === 'KG' ? f.consumption : 0.2) + 1.1), length: 60, width: 40, height: 30 }],
+      warehouse: `${unit === 'U1' ? 'Unit-1' : 'Unit-2'} Finished Goods Warehouse`, location: `Bay ${(counters.cont % 4) + 1} / Rack ${String.fromCharCode(65 + (from % 6))}`, barcodeRange: `SSCC 0089${unit === 'U1' ? 1 : 2}${String(counters.dc).padStart(5, '0')}${String(from).padStart(4, '0')}–${String(to).padStart(4, '0')}` });
+    await api.status('packing', p._id, 'Packed', 'Verified');
+    return p;
+  };
+  const finalInspection = async (lotSize, dd) => {
+    const fin = await api.post('/m/inspection', { job: jobNo, inspectionDate: day(dd), inspectionType: 'Final', inspector: 'Buyer QA', inspectionAgency: `${spec.buyer} QA`, lotSize, majorDefects: 3, minorDefects: 6 });
+    await api.status('inspection', fin._id, 'Inspection', 'Passed', 'Final Approved');
+  };
+  // finishing complete, packing still running (about 60 %) – finished goods partially packed, nothing shipped
+  if (target === 'packingPartial') { await pack(1, Math.floor(fullCartons * 0.6), Math.min(d + 2, -1)); return; }
+  if (target === 'partShipped') {
+    // first lot packed, inspected and shipped; the balance packed afterwards and waiting for the next vessel
+    const first = Math.floor(fullCartons * 0.55);
+    const pk1 = await pack(1, first, Math.min(d + 2, -6));
+    await finalInspection(pk1.totalQty, Math.min(d + 3, -5));
+    const s1 = await api.post('/m/shipment', { job: jobNo, invoiceNo: `${unit}-EXP-${jobNo.split('-').slice(1).join('')}-1`, mode: 'Sea', shipmentDate: day(-3), vesselFlight: 'CMA CGM TIGRIS 0QF6', containerNo: `MSKU${7000000 + counters.cont++}`, portOfLoading: unit === 'U1' ? 'Tuticorin' : 'Chennai', forwarder: 'Maersk Logistics', etd: day(-3) });
+    await api.put(`/m/shipment/${s1._id}`, { actualShipDate: day(-3), blAwbNo: `MAEU${240000000 + counters.cont * 17}`, eta: day(25) });
+    await api.status('shipment', s1._id, 'Booked', 'Stuffed', 'Shipped');
+    const inv = await api.post('/m/invoice', { job: jobNo, shipment: s1._id, invoiceDate: day(-2), dueDate: day(43), otherCharges: 0, discount: 0 });
+    await api.status('invoice', inv._id, 'Issued');
+    await api.post('/m/payment', { job: jobNo, invoice: inv._id, paymentDate: day(-1), amount: r2(inv.totalAmount * 0.3), mode: 'TT', reference: `TT-${counters.bill++}`, bankCharges: 20 });
+    const pk2 = await pack(first + 1, fullCartons, -1);
+    await finalInspection(pk2.totalQty, 0);
+    return;
+  }
+  const pk = await pack(1, fullCartons, d + 2);
+  await finalInspection(pk.totalQty, d + 3);
   if (target === 'packing') return;
   // shipment (pulls cartons / weights / CBM from packing)
   const shipDay = Math.min(d + 5, -1); // after packing & final inspection
@@ -366,6 +619,9 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
   await api.put(`/m/shipment/${shp._id}`, { actualShipDate: day(shipDay), blAwbNo: `MAEU${240000000 + counters.cont * 17}`, eta: day(shipDay + 28) });
   await api.status('shipment', shp._id, 'Booked', 'Stuffed', 'Shipped');
   if (target === 'shipped') return;
+  // buyer confirmed receipt (proof of delivery)
+  await api.put(`/m/shipment/${shp._id}`, { deliveredDate: day(Math.min(shipDay + 20, 0)), podRef: `POD/${spec.destination.slice(0, 3).toUpperCase()}/${counters.cont * 31}` });
+  await api.status('shipment', shp._id, 'Delivered');
   // documents, invoice, payment, expenses
   for (const docType of ['Commercial Invoice', 'Packing List', 'Bill of Lading (BL)']) {
     const fd = new FormData();
@@ -381,6 +637,14 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
   }
   await api.post('/m/expense', { job: jobNo, category: 'Freight', description: `Ocean freight & CHA – ${shp.invoiceNo}`, expenseDate: day(shipDay), amount: r2(shp.qty * (spec.costing.freightCost || 0.1)), vendor: 'Maersk Logistics', billNo: `ML-${counters.bill++}` });
   await api.post('/m/expense', { job: jobNo, category: 'Testing', description: 'Bulk fabric & garment testing', expenseDate: day(ps - 2), amount: 185, vendor: 'SGS Testing', billNo: `SGS-${counters.bill++}` });
+  // supplier bills (payables) for the outside services booked as job expenses above – same amounts, no extra cost
+  const SERVICE = { Printing: 'Colour Print Hub', Washing: 'Bright Wash Industries', Embroidery: 'Stitch Art Embroidery' };
+  const payServices = reach(target, 'readyToClose') ? 'full' : null;
+  for (const [category, perPcCost] of (spec.expenses || []).filter(([c]) => SERVICE[c])) {
+    await supplierBill(api, jobNo, { supplier: ids.suppliers[SERVICE[category]], billNo: `${SERVICE[category].split(' ').map((w) => w[0]).join('')}/${jobNo.split('-').slice(1).join('')}`, day: d, billType: 'Service – Washing / Printing / Embroidery', poRef: `${unit}-SPO-${counters.bill++}`, description: `${category} of ${shp.qty} pcs`, qty: shp.qty, unit: 'Pcs', rate: perPcCost, taxPct: 0, pay: payServices }, counters);
+  }
+  await supplierBill(api, jobNo, { supplier: ids.suppliers['Maersk Logistics'], billNo: `ML/FRT/${shp.invoiceNo}`, day: shipDay, billType: 'Freight / Logistics', poRef: shp.refNo, description: `Ocean freight & CHA ${shp.invoiceNo}`, qty: shp.qty, unit: 'Pcs', rate: spec.costing.freightCost || 0.1, taxPct: 0, terms: 30, pay: payServices }, counters);
+  await supplierBill(api, jobNo, { supplier: ids.suppliers['SGS Testing'], billNo: `SGS/${jobNo}`, day: ps - 2, billType: 'Testing', poRef: 'Test request', description: 'Bulk fabric & garment testing', qty: 1, unit: 'Lot', rate: 185, taxPct: 0, terms: 30, pay: reach(target, 'accountsPending') ? 'full' : null }, counters);
   if (target === 'accountsPending') {
     if (spec.payPart) await api.post('/m/payment', { job: jobNo, invoice: inv._id, paymentDate: day(invDay), amount: r2(inv.totalAmount * spec.payPart), mode: 'TT', reference: `TT-${counters.bill++}`, bankCharges: 25 });
     return;
@@ -388,14 +652,16 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
   await api.post('/m/payment', { job: jobNo, invoice: inv._id, paymentDate: day(Math.max(invDay, Math.min(shipDay + 30, 0))), amount: inv.totalAmount, mode: 'TT', reference: `TT-${counters.bill++}`, bankCharges: 35 });
   // closure: consume fabric & trims, close fabric job, close the job (must be READY – no override)
   for (const fb of (await api.get(`/jobs/track/${jobNo}`)).records.fabricBooking) {
+    // fabric issued and not returned is consumed; what came back from cutting stays in store as excess balance
     const full = await api.get(`/m/fabricBooking/${fb._id}`);
-    await api.put(`/m/fabricBooking/${fb._id}`, { issuedQty: full.approvedQty, usedQty: full.approvedQty });
+    await api.put(`/m/fabricBooking/${fb._id}`, { usedQty: full.netIssuedQty });
     await api.status('fabricBooking', fb._id, 'Fully Consumed');
     const after = await api.get(`/m/fabricBooking/${fb._id}`);
     if (String(after.closureVerdict).startsWith('READY')) await api.status('fabricBooking', fb._id, 'Fabric Job Closed');
   }
   const tr = await api.get(`/jobs/track/${jobNo}`);
   if (!tr.lifecycle.readyToClose) throw new Error(`${jobNo} not ready to close: ${tr.lifecycle.blockers.join('; ')}`);
+  if (target === 'readyToClose') return; // every condition met – waiting for the closing sign-off
   await api.post(`/jobs/${tr.job._id}/close`, { remarks: 'All production, shipment, documents and payments complete' });
 }
 
@@ -404,13 +670,29 @@ async function runForecastJob(api, unit, job, spec, ids, counters, crossUnit) {
   const t = await api.get(`/jobs/track/${job.jobNo}`);
   const ff = t.records.fabricForecast[0];
   const plan = spec.forecastPlan;
-  await api.put(`/m/fabricForecast/${ff._id}`, { supplier: ids.suppliers[plan.supplier], supplierPoNo: plan.supplierPoNo, lotNo: plan.lotNo, requiredDate: day(spec.orderDays + 15), receivedQty: plan.received, receivedDate: day(plan.receivedDays), remarks: `Bulk ${spec.fabric.fabricType} for ${spec.poNo} call-offs` });
-  await api.status('fabricForecast', ff._id, 'Confirmed', 'Received');
+  // bulk fabric purchased on the main job: roll-wise inward against the forecast, the failed roll back with a debit note
+  await api.put(`/m/fabricForecast/${ff._id}`, { supplier: ids.suppliers[plan.supplier], supplierPoNo: plan.supplierPoNo, poDate: day(spec.orderDays + 1), requiredDate: day(spec.orderDays + 15), remarks: `Bulk ${spec.fabric.fabricType} for ${spec.poNo} call-offs` });
+  await api.status('fabricForecast', ff._id, 'Confirmed');
+  const inward = await fabricInward(api, job.jobNo, { forecast: ff._id }, plan.received, spec.fabric, [plan.lotNo, `${plan.lotNo}-2`], plan.receivedDays - 3, counters);
+  await api.status('fabricForecast', ff._id, 'Received');
+  const back = await rejectedRollBack(api, job.jobNo, { forecast: ff._id }, inward.rejected, plan.receivedDays + 1, 'Adjusted', counters);
+  await supplierBill(api, job.jobNo, { supplier: ids.suppliers[plan.supplier], billNo: `${plan.supplierPoNo}/INV`, day: plan.receivedDays, billType: 'Fabric', poRef: plan.supplierPoNo,
+    description: `Bulk ${spec.fabric.fabricType} ${spec.fabric.color} for call-offs (forecast ${ff.refNo})`, qty: r2(plan.received + inward.rejected.qty), unit: spec.fabric.unit, rate: spec.fabric.rate,
+    setOff: back.setOff, setOffRefs: back.dn.refNo, pay: 'full' }, counters);
   const subs = [];
   for (const [n, s] of spec.subJobs.entries()) {
     const ft = await api.post('/m/fabricTransfer', { job: job.jobNo, sourceForecast: ff._id, qty: s.fabric, transferDate: day(s.day), toUnit: unit, createSubJob: true, subJobQty: s.qty, subJobShipmentDate: day(s.ship), reason: 'New production requirement', referenceDoc: s.ref, remarks: `Call-off ${n + 1} of ${spec.poNo}` });
     await api.status('fabricTransfer', ft._id, 'Approved', 'Completed');
     const done = await api.get(`/m/fabricTransfer/${ft._id}`);
+    // the call-off's own PO, colour, size ratio and delivery (the transfer creates the sub job from the main job)
+    const subJob = (await api.get(`/jobs/track/${done.toJobNo}`)).job;
+    const ratio = spec.ratio.split(',').map((x) => { const [size, q] = x.split(':'); return [size, Number(q)]; });
+    const per = s.qty / ratio.reduce((a, [, q]) => a + q, 0);
+    await api.put(`/jobs/${subJob._id}`, {
+      poNo: s.poNo, colors: [s.color], fabricColor: s.color, deliveryDate: day(s.ship + 21), sizes: spec.sizes,
+      sizeBreakdown: ratio.map(([size, q]) => ({ color: s.color, size, qty: Math.round(per * q) })),
+      _revisionReason: `Call-off PO ${s.poNo} received (${s.ref})`,
+    });
     subs.push({ ...s, jobNo: done.toJobNo, transfer: done.refNo });
   }
   if (crossUnit) {
@@ -421,21 +703,51 @@ async function runForecastJob(api, unit, job, spec, ids, counters, crossUnit) {
     const sub = { ...spec, orderDays: s.day, shipDays: s.ship, qty: s.qty };
     await runJob(api, unit, s.jobNo, sub, s.stage, ids, counters);
   }
+  if (spec.closeMain) {
+    // every call-off closed and the forecast fabric fully allocated → close the forecast, then the main job
+    const fc = await api.get(`/m/fabricForecast/${ff._id}`);
+    if (Math.abs(fc.balanceQty) > 0.001) throw new Error(`${job.jobNo}: forecast balance ${fc.balanceQty} ${fc.unit} left – cannot close`);
+    await api.status('fabricForecast', ff._id, 'Allocated', 'Closed');
+    const tr = await api.get(`/jobs/track/${job.jobNo}`);
+    if (!tr.lifecycle.readyToClose) throw new Error(`${job.jobNo} not ready to close: ${tr.lifecycle.blockers.join('; ')}`);
+    await api.post(`/jobs/${tr.job._id}/close`, { remarks: 'All call-off sub jobs closed, forecast fabric fully allocated' });
+  }
   return subs;
 }
 
 async function buildDataset() {
-  const counters = { line: 0, cont: 1, bill: 1001 };
-  const ids = { buyers: {}, suppliers: {} };
+  const counters = { line: 0, cont: 1, bill: 1001, dc: 501, debitKind: 0 };
+  const ids = { buyers: {}, suppliers: {}, createdMasters: { buyer: [], supplier: [], master: [], employee: [] } };
   const u1 = U('U1'); const u2 = U('U2');
   // masters (shared by both units): reuse existing, add missing realistic ones
   for (const b of BUYERS) {
     const found = (await u1.get(`/m/buyer?q=${encodeURIComponent(b.name)}`)).rows.find((x) => x.name === b.name);
-    ids.buyers[b.name] = found?._id || (await u1.post('/m/buyer', b))._id;
+    if (!found) ids.createdMasters.buyer.push((ids.buyers[b.name] = (await u1.post('/m/buyer', b))._id));
+    else ids.buyers[b.name] = found._id;
+    // buyer contacts only where the buyer has none (existing buyer data is never overwritten)
+    const cur = await u1.get(`/m/buyer/${ids.buyers[b.name]}`);
+    const contacts = (CONTACTS[b.name] || []).map(([name, role]) => ({ name, role, email: `${name.split(' ')[0].toLowerCase()}@${b.code.toLowerCase()}-sample.test`, phone: '' }));
+    if (!(cur.contacts || []).length && contacts.length) await u1.put(`/m/buyer/${cur._id}`, { contacts, contactPerson: cur.contactPerson || contacts[0].name, email: cur.email || contacts[0].email });
   }
   for (const s of SUPPLIERS) {
     const found = (await u1.get(`/m/supplier?q=${encodeURIComponent(s.name)}`)).rows.find((x) => x.name === s.name);
-    ids.suppliers[s.name] = found?._id || (await u1.post('/m/supplier', s))._id;
+    if (!found) ids.createdMasters.supplier.push((ids.suppliers[s.name] = (await u1.post('/m/supplier', s))._id));
+    else ids.suppliers[s.name] = found._id;
+  }
+  // master data used by the dataset (styles, costing templates, shipment methods…) – added only when missing
+  for (const [masterType, name] of MASTER_SAMPLES) {
+    if ((await u1.get(`/m/master?q=${encodeURIComponent(name)}`)).rows.some((m) => m.masterType === masterType && m.name === name)) continue;
+    ids.createdMasters.master.push((await u1.post('/m/master', { masterType, name, code: name.slice(0, 12).toUpperCase(), remarks: 'Sample / Test data' }))._id);
+  }
+  // sample employees per unit (codes SMP-U1-… / SMP-U2-…), added only when missing
+  for (const unit of ['U1', 'U2']) {
+    const api = unit === 'U1' ? u1 : u2;
+    const have = new Set((await api.get('/m/employee?q=SMP-&limit=500')).rows.map((e) => e.empCode));
+    for (const [n, name, department, designation, line, skillGrade, isOperator] of EMPLOYEES) {
+      const empCode = `SMP-${unit}-${n}`;
+      if (have.has(empCode)) continue;
+      ids.createdMasters.employee.push((await api.post('/m/employee', { empCode, name: unit === 'U1' ? name : name.replace(/^(\w)\. /, 'T. '), department, designation, line, skillGrade, isOperator, joinDate: day(-900 + Number(n) * 37), workingDays: 26, presentDays: 23 + (Number(n) % 4) }))._id);
+    }
   }
   const created = { U1: [], U2: [] };
   // orders in each unit, in series order
@@ -449,25 +761,99 @@ async function buildDataset() {
   }
   // Unit-2 regular jobs first (the cross-unit transfer needs the Unit-2 lounge tee job)
   for (const { spec, job } of created.U2.filter((x) => !x.spec.forecast)) await runJob(u2, 'U2', job.jobNo, spec, spec.stage, ids, counters);
+  for (const { spec, job } of created.U2.filter((x) => x.spec.hold)) await u2.post(`/jobs/${job._id}/status`, { status: 'On Hold', reason: spec.hold });
   const u2Lounge = created.U2.find((x) => x.spec.key === 'U2-LOUNGE').job.jobNo;
   for (const { spec, job } of created.U1.filter((x) => !x.spec.forecast)) await runJob(u1, 'U1', job.jobNo, spec, spec.stage, ids, counters);
   const main1 = created.U1.find((x) => x.spec.forecast);
   const subs1 = await runForecastJob(u1, 'U1', main1.job, main1.spec, ids, counters, { qty: 300, day: -20, toUnit: 'U2', toJobNo: u2Lounge, ref: 'IUT/2026/014 inter-unit transfer note' });
   const main2 = created.U2.find((x) => x.spec.forecast);
   const subs2 = await runForecastJob(u2, 'U2', main2.job, main2.spec, ids, counters);
+  // repeat buyers: advance jobs for next month's orders, opened before the buyer PO exists
+  const jobNoOf = (unit, key) => created[unit].find((x) => x.spec.key === key)?.job.jobNo;
+  const advance = { U1: [], U2: [] };
+  for (const unit of ['U1', 'U2']) {
+    const api = unit === 'U1' ? u1 : u2;
+    for (const adv of ADVANCE[unit]) {
+      // same style, fabric, trims and costing basis as the previous order (its own new quotation)
+      const OWN = ['key', 'poNo', 'stage', 'forecast', 'forecastPlan', 'subJobs', 'closeMain', 'expenses', 'payFull', 'payPart', 'partialFabric'];
+      const base = Object.fromEntries(Object.entries(JOBS[unit].find((s) => s.key === adv.fabricOf)).filter(([k]) => !OWN.includes(k)));
+      const spec = { ...base, ...adv, repeatOfJobNo: jobNoOf(unit, adv.repeatOf) };
+      const job = await confirmOrder(api, spec, ids);
+      log(`  ${unit} ${job.jobNo}  ${spec.buyer} · ${spec.styleNo} · forecast ${spec.qty} pcs – ADVANCE job, repeat of ${spec.repeatOfJobNo}, awaiting PO (expected ${spec.expectedOrderMonth})`);
+      advance[unit].push({ spec, job });
+    }
+  }
+  for (const unit of ['U1', 'U2']) {
+    const api = unit === 'U1' ? u1 : u2;
+    for (const { spec, job } of advance[unit]) {
+      const ratio = spec.ratio.split(',').map((x) => { const [size, q] = x.split(':'); return [size, Number(q)]; });
+      const breakdown = (qty, color) => ratio.map(([size, q]) => ({ color, size, qty: Math.round((qty * q) / ratio.reduce((t, [, w]) => t + w, 0)) }));
+      if (!spec.subJobs) { await runJob(api, unit, job.jobNo, spec, spec.stage, ids, counters); continue; }
+      // bulk fabric forecast confirmed with the mill for the coming call-offs
+      const ff = (await api.get(`/jobs/track/${job.jobNo}`)).records.fabricForecast[0];
+      await api.put(`/m/fabricForecast/${ff._id}`, { supplier: ids.suppliers[unit === 'U1' ? 'Pioneer Knit Fabrics' : 'Arvind Mills'], supplierPoNo: `${unit}/FC/${spec.expectedOrderMonth}`, poDate: day(spec.orderDays + 1), requiredDate: day(spec.orderDays + 25), remarks: `Forecast fabric for ${spec.buyer} ${spec.expectedOrderMonth} call-offs (advance job)` });
+      await api.status('fabricForecast', ff._id, 'Confirmed');
+      const subs = await api.post(`/jobs/${job._id}/subjobs`, { subJobs: spec.subJobs.map((s) => ({ orderQty: s.qty, orderDate: day(spec.orderDays), shipmentDate: day(s.ship), deliveryDate: day(s.ship + 21), colors: [spec.fabric.color], sizeBreakdown: breakdown(s.qty, spec.fabric.color) })) });
+      for (const [i, s] of spec.subJobs.entries()) {
+        const sub = subs[i];
+        const po = s.callOff || s.pendingPo;
+        if (po) {
+          const bo = await api.post('/m/buyerOrder', {
+            orderType: 'Forecast Call-off', buyer: ids.buyers[spec.buyer], poNo: po.poNo, styleNo: spec.styleNo, product: spec.product, garmentType: spec.garmentType,
+            orderDate: day(po.orderDays), deliveryDate: day(s.ship + 21), shipmentDate: day(s.ship), orderQty: s.qty, unitPrice: spec.price, currency: 'USD',
+            color: po.color, sizeRatio: spec.ratio, destination: spec.destination, repeatOfJobNo: spec.repeatOfJobNo, remarks: `Call-off for advance job ${job.jobNo} – Sample / Test data`,
+          });
+          if (s.callOff) await api.post(`/jobs/${sub._id}/link-po`, { buyerOrder: bo._id });
+        }
+        log(`      ${sub.jobNo} ${s.qty} pcs${s.callOff ? ` – actual PO ${s.callOff.poNo} linked` : s.pendingPo ? ` – PO ${s.pendingPo.poNo} received, not linked yet` : ' – awaiting PO'}`);
+        if (s.stage) await runJob(api, unit, sub.jobNo, { ...spec, orderDays: spec.orderDays, shipDays: s.ship, qty: s.qty }, s.stage, ids, counters);
+      }
+    }
+  }
+  // buyer POs received today / this week and not yet converted into jobs
+  for (const unit of ['U1', 'U2']) {
+    const api = unit === 'U1' ? u1 : u2;
+    for (const o of NEW_ORDERS[unit]) {
+      const bo = await api.post('/m/buyerOrder', {
+        orderType: o.orderType, buyer: ids.buyers[o.buyer], poNo: o.poNo, styleNo: o.styleNo, product: o.product, garmentType: o.garmentType,
+        orderDate: day(o.orderDays), deliveryDate: day(o.deliveryDays), shipmentDate: day(o.deliveryDays - 21), orderQty: o.qty, unitPrice: o.unitPrice, currency: 'USD',
+        color: o.color, sizeRatio: o.sizeRatio, destination: o.destination, repeatOfJobNo: o.repeatOf ? jobNoOf(unit, o.repeatOf) : undefined, remarks: 'Sample / Test data',
+      });
+      if (o.review) await api.status('buyerOrder', bo._id, 'Under Review');
+      log(`  ${unit} New order ${bo.refNo}  ${o.buyer} PO ${o.poNo} · ${o.styleNo} · ${o.qty} pcs (${o.orderType}) – awaiting job creation`);
+    }
+  }
   // company-level finance lines for EBITDA (per unit, last 3 months)
   for (const [unit, api, scale] of [['U1', u1, 1], ['U2', u2, 0.8]]) {
     for (const m of [-60, -30, -2]) {
-      for (const [category, amount, vendor] of [['Admin Expense', 3800, 'Office & admin'], ['Interest', 1150, 'Bank – working capital loan'], ['Tax', 900, 'Advance tax'], ['Depreciation', 2400, 'Machinery depreciation'], ['Amortization', 350, 'CAD software licence']]) {
+      for (const [category, amount, vendor] of [['Admin Expense', 1250, 'Office & admin'], ['Interest', 420, 'Bank – working capital loan'], ['Tax', 380, 'Advance tax'], ['Depreciation', 860, 'Machinery depreciation'], ['Amortization', 120, 'CAD software licence']]) {
         await api.post('/m/expense', { category, description: `${category} – ${unit} monthly`, expenseDate: day(m), amount: r2(amount * scale), vendor, billNo: `${unit}-GL-${counters.bill++}` });
       }
     }
   }
-  return { created, subs1, subs2 };
+  return { created, subs1, subs2, advance, createdMasters: ids.createdMasters };
+}
+
+/** Flag everything this run created as Sample / Test data (masters it added too – they are never removed). */
+async function markSample(startedAt, createdMasters) {
+  let n = 0;
+  for (const k of TX_MODULES) n += (await models[k].updateMany({ createdAt: { $gte: startedAt }, isSampleData: { $ne: true } }, { $set: SAMPLE })).modifiedCount;
+  for (const [k, list] of Object.entries(createdMasters)) if (list.length) await models[k].updateMany({ _id: { $in: list } }, { $set: SAMPLE });
+  // the dataset is built in one run "today": give its order revisions and shipping documents the business dates
+  // they belong to (the call-off PO date / the shipment), so the job history reads in real order
+  for (const j of await models.orders.find({ createdAt: { $gte: startedAt }, 'revisions.0': { $exists: true } }).lean()) {
+    const bo = await models.buyerOrder.findOne({ job: j._id, isDeleted: false }).lean();
+    await models.orders.collection.updateOne({ _id: j._id }, { $set: { 'revisions.$[].at': bo?.orderDate || j.orderDate } });
+  }
+  for (const d of await DocumentFile.find({ createdAt: { $gte: startedAt } }).lean()) {
+    const s = await models.shipment.findOne({ job: d.job, isDeleted: false, status: 'Shipped' }).sort({ actualShipDate: -1 }).lean();
+    if (s?.actualShipDate) await DocumentFile.collection.updateOne({ _id: d._id }, { $set: { createdAt: new Date(s.actualShipDate.getTime() + 86400000), uploadedAt: new Date(s.actualShipDate.getTime() + 86400000) } });
+  }
+  log(`Flagged ${n} new transaction records (and ${Object.values(createdMasters).flat().length} new master / employee records) as Sample / Test data.`);
 }
 
 /* ============================== 5. Validation ============================== */
-async function validate(keepBefore) {
+async function validate(keepBefore, startedAt) {
   const issues = [];
   const jobs = await models.orders.find({ isDeleted: false }).lean();
   const byId = new Map(jobs.map((j) => [String(j._id), j]));
@@ -476,12 +862,23 @@ async function validate(keepBefore) {
   jobs.forEach((j) => {
     const series = j.businessUnit === 'U1' ? /^U1-1\d{3}(-S\d{2})?$/ : /^U2-3\d{3}(-S\d{2})?$/;
     if (!series.test(j.jobNo)) issues.push(`Job ${j.jobNo} (${j.businessUnit}) outside its unit series`);
-    if (!j.buyer || !j.orderNo || !j.poNo || !j.styleNo) issues.push(`Job ${j.jobNo} missing buyer / order / PO / style`);
+    if (!j.buyer || !j.orderNo || (!j.poNo && j.poStatus !== 'Awaiting PO') || !j.styleNo) issues.push(`Job ${j.jobNo} missing buyer / order / PO / style`);
     if (j.parentJob) {
       const p = byId.get(String(j.parentJob));
       if (!p || !j.jobNo.startsWith(`${p.jobNo}-S`) || p.businessUnit !== j.businessUnit) issues.push(`Sub job ${j.jobNo} has a wrong main job`);
     }
   });
+  // every transaction (job-linked or company-level) carries its unit
+  for (const k of TX_MODULES) {
+    const n = await models[k].countDocuments({ businessUnit: { $nin: ['U1', 'U2'] } });
+    if (n) issues.push(`${n} ${k} record(s) without a valid Unit ID`);
+  }
+  for (const [k, M] of Object.entries({ stockmovements: StockMovement, documentfiles: DocumentFile })) {
+    const n = await M.countDocuments({ businessUnit: { $nin: ['U1', 'U2'] } });
+    if (n) issues.push(`${n} ${k} record(s) without a valid Unit ID`);
+  }
+  const subNos = jobs.filter((j) => j.parentJob).map((j) => j.jobNo);
+  if (new Set(subNos).size !== subNos.length) issues.push('Duplicate sub job numbers');
   let checked = 0;
   for (const def of MODULE_LIST.filter((d) => d.jobLinked)) {
     const rows = await models[def.key].find({ isDeleted: false }).lean();
@@ -528,9 +925,193 @@ async function validate(keepBefore) {
       if (lc.blockers.length) issues.push(`Closed job ${g.job.jobNo} has open conditions: ${lc.blockers.join('; ')}`);
     }
   }
+  // buyer POs (New Orders): converted / linked ones point at a job of the same unit, buyer and PO
+  for (const b of await models.buyerOrder.find({ isDeleted: false }).lean()) {
+    const j = b.jobNo && jobs.find((x) => x.jobNo === b.jobNo);
+    if (['Job Created', 'Linked to Job'].includes(b.status)) {
+      if (!j) issues.push(`Buyer order ${b.refNo} (${b.status}) → job ${b.jobNo} missing`);
+      else if (j.businessUnit !== b.businessUnit || String(j.buyer) !== String(b.buyer) || j.poNo !== b.poNo) issues.push(`Buyer order ${b.refNo} PO ${b.poNo} ≠ job ${j.jobNo} (unit / buyer / PO)`);
+    } else if (b.jobNo) issues.push(`Buyer order ${b.refNo} is ${b.status} but carries job ${b.jobNo}`);
+  }
+  // forecast quantities are never shipped, invoiced or closed as confirmed orders
+  for (const j of jobs.filter((x) => x.poStatus === 'Awaiting PO')) {
+    if (j.poNo && !j.parentJob) issues.push(`Advance job ${j.jobNo} carries a PO No while awaiting its PO`);
+    if (await models.shipment.exists({ job: j._id, isDeleted: false })) issues.push(`Advance job ${j.jobNo} (awaiting PO) has a shipment`);
+    if (await models.invoice.exists({ job: j._id, isDeleted: false })) issues.push(`Advance job ${j.jobNo} (awaiting PO) has an invoice`);
+    if (j.status === 'Closed') issues.push(`Advance job ${j.jobNo} closed without a PO`);
+  }
+  // quantities reconcile along the chain, and accounts with the shipments
+  for (const g of graphs.filter((x) => !x.subJobs.length)) {
+    const q = { cut: sum(g.cutting, 'cutQty'), sewn: sum(g.sewing, 'actualQty'), fin: sum(g.finishing, 'passedQty'), packed: sum(g.packing, 'totalQty'), shipped: sum(g.shipments.filter((s) => ['Shipped', 'Delivered'].includes(s.status)), 'qty') };
+    if (q.sewn > q.cut || q.fin > q.sewn || q.packed > q.fin || q.shipped > q.packed) issues.push(`${g.job.jobNo}: quantities out of order ${JSON.stringify(q)}`);
+    if (q.shipped > num(g.job.orderQty)) issues.push(`${g.job.jobNo}: shipped ${q.shipped} > ordered ${g.job.orderQty}`);
+    const invQty = sum(g.invoices, 'qty');
+    if (invQty > q.shipped) issues.push(`${g.job.jobNo}: invoiced ${invQty} pcs > shipped ${q.shipped}`);
+    for (const i of g.invoices) {
+      const paid = sum(g.payments.filter((p) => String(p.invoice) === String(i._id)), 'amount');
+      if (paid > num(i.totalAmount) + 0.01) issues.push(`${g.job.jobNo}: invoice ${i.invoiceNo} paid ${paid} > ${i.totalAmount}`);
+      if (Math.abs(num(i.outstanding) - (num(i.totalAmount) - paid)) > 0.01) issues.push(`${g.job.jobNo}: invoice ${i.invoiceNo} outstanding ${i.outstanding} ≠ ${round(num(i.totalAmount) - paid)}`);
+    }
+    const p = computeProfit(g);
+    if (Math.abs(p.revenue - (sum(g.invoices, 'totalAmount') || q.shipped * num(g.job.unitPrice))) > 0.01) issues.push(`${g.job.jobNo}: profit revenue ${p.revenue} ≠ invoices`);
+  }
+  // payables: bill arithmetic, set-offs tie to adjusted supplier debit notes, deliveries carry their confirmation
+  for (const b of await models.supplierBill.find({ isDeleted: false }).lean()) {
+    if (Math.abs(num(b.outstanding) - (num(b.totalAmount) - num(b.debitNoteAdjusted) - num(b.paidAmount))) > 0.01 || num(b.outstanding) < -0.01) issues.push(`Supplier bill ${b.billNo}: outstanding ${b.outstanding} does not reconcile`);
+    if (num(b.debitNoteAdjusted) > 0) {
+      const dn = await models.fabricDebit.findOne({ refNo: b.debitNoteRefs, isDeleted: false }).lean();
+      if (!dn || dn.status !== 'Adjusted' || Math.abs(num(dn.amount) - num(b.debitNoteAdjusted)) > 0.01) issues.push(`Supplier bill ${b.billNo}: set-off ${b.debitNoteAdjusted} ≠ adjusted debit note ${b.debitNoteRefs}`);
+    }
+  }
+  for (const s of await models.shipment.find({ isDeleted: false, status: 'Delivered' }).lean()) if (!s.deliveredDate || !s.podRef) issues.push(`Shipment ${s.refNo} delivered without date / proof of delivery`);
+  // everything this run created is marked as Sample / Test data
+  if (startedAt) {
+    for (const k of TX_MODULES) {
+      const n = await models[k].countDocuments({ createdAt: { $gte: startedAt }, isSampleData: { $ne: true } });
+      if (n) issues.push(`${n} new ${k} record(s) not flagged as sample data`);
+    }
+  }
   const keepAfter = { users: await User.countDocuments(), roles: await Role.countDocuments(), master: await models.master.countDocuments(), employee: await models.employee.countDocuments() };
   ['users', 'roles', 'master', 'employee'].forEach((k) => { if (keepAfter[k] < keepBefore[k]) issues.push(`${k} reduced from ${keepBefore[k]} to ${keepAfter[k]}`); });
   return { issues, checked, profits };
+}
+
+/* ============================== 6. API checks: unit dashboards, reports, analytics, Job 360 ============================== */
+async function apiChecks() {
+  const issues = []; const out = {};
+  const PREFIX = { U1: 'U1-', U2: 'U2-' };
+  const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+  const rowsOf = (r) => (Array.isArray(r) ? r : r.rows || []);
+  const period = `from=${day(-180)}&to=${day(0)}`;
+  for (const unit of ['U1', 'U2']) {
+    const api = U(unit); const other = unit === 'U1' ? 'U2' : 'U1';
+    // unit dashboard: only this unit's jobs, counts match the database
+    const dash = await api.get('/dashboard');
+    const listed = Object.values(dash.lists).flat().map((x) => x?.jobNo).filter(Boolean);
+    const leak = listed.filter((n) => !n.startsWith(PREFIX[unit]));
+    if (leak.length) issues.push(`${unit} dashboard lists other-unit jobs: ${[...new Set(leak)].join(', ')}`);
+    const dbJobs = await models.orders.find({ businessUnit: unit, isDeleted: false }).lean();
+    const dbActive = dbJobs.filter((j) => !(j.isForecast && Number(j.subJobCount) > 0) && !['Closed', 'Cancelled'].includes(j.status)).length;
+    if (dash.summary.activeJobs !== dbActive) issues.push(`${unit} dashboard active jobs ${dash.summary.activeJobs} ≠ database ${dbActive}`);
+    // reports: unit-scoped, and the job filter narrows to one job
+    for (const key of ['job-closure', 'accounts', 'sales']) {
+      const rows = rowsOf(await api.get(`/reports/${key}`));
+      const bad = rows.filter((x) => x.jobNo && !x.jobNo.startsWith(PREFIX[unit]));
+      if (bad.length) issues.push(`${unit} report ${key} shows ${bad.length} other-unit row(s)`);
+      if (!rows.length) issues.push(`${unit} report ${key} is empty`);
+    }
+    const oneJob = unit === 'U1' ? 'U1-1001' : 'U2-3001';
+    const byJob = rowsOf(await api.get(`/reports/sales?job=${oneJob}`));
+    if (!byJob.length || byJob.some((x) => x.jobNo !== oneJob)) issues.push(`${unit} sales report filter jobNo=${oneJob} returned ${byJob.map((x) => x.jobNo).join(', ') || 'nothing'}`);
+    // management analytics on the new data
+    const a = await api.get(`/analytics/summary?${period}`);
+    const fin = a.finance; const inv = a.inventory;
+    ['revenue', 'cogs', 'grossProfit', 'ebitda', 'netProfit'].forEach((k) => { if (!finite(fin[k])) issues.push(`${unit} analytics ${k} = ${fin[k]}`); });
+    if (!(fin.revenue > 0)) issues.push(`${unit} analytics revenue is 0`);
+    if (!finite(inv.itr)) issues.push(`${unit} ITR = ${inv.itr}`);
+    if (inv.holdingDays !== null && !finite(inv.holdingDays)) issues.push(`${unit} holding days = ${inv.holdingDays}`);
+    if (!finite(a.roi.roiPct)) issues.push(`${unit} ROI = ${a.roi.roiPct}`);
+    // main job dashboard: all sub jobs with their own figures; main closes only after every sub job
+    const mainNo = unit === 'U1' ? 'U1-1000' : 'U2-3000';
+    const m = await api.get(`/jobs/track/${mainNo}`);
+    if (m.subJobSummary.length !== 3) issues.push(`${mainNo} shows ${m.subJobSummary.length} sub jobs, expected 3`);
+    m.subJobSummary.forEach((x, i) => { if (x.jobNo !== `${mainNo}-S${String(i + 1).padStart(2, '0')}`) issues.push(`${mainNo} sub job ${i + 1} numbered ${x.jobNo}`); });
+    const subsClosed = m.subJobSummary.every((x) => x.status === 'Closed');
+    if ((m.job.status === 'Closed') !== subsClosed) issues.push(`${mainNo} is ${m.job.status} while all sub jobs closed = ${subsClosed}`);
+    if (!subsClosed && !m.lifecycle.blockers.some((b) => b.includes('Sub job'))) issues.push(`${mainNo}: open sub jobs do not block main job closure`);
+    if (m.subJobSummary.some((x) => x.status === 'Closed' && !(x.shippedQty > 0 && x.revenue > 0))) issues.push(`${mainNo}: a closed sub job has no shipment / revenue`);
+    // the other unit's jobs cannot be opened from this unit
+    const foreign = other === 'U1' ? 'U1-1000' : 'U2-3000';
+    const peek = await fetch(`${BASE}/jobs/track/${foreign}`, { headers: { Authorization: `Bearer ${tokens[unit]}` } });
+    if (peek.ok) issues.push(`${unit} can open ${foreign} of ${other}`);
+    // order & job tracking: unit-only rows, counts = lists, quantities reconcile with the database
+    const t = await api.get('/tracking');
+    const allRows = [...Object.values(t.lists).flat(), ...t.mainJobs];
+    const foreignRows = allRows.filter((x) => x.unit !== unit || (x.jobNo && !x.jobNo.startsWith(PREFIX[unit])));
+    if (foreignRows.length) issues.push(`${unit} tracking shows ${foreignRows.length} other-unit row(s)`);
+    TRACKING_LISTS.forEach((l) => { if (t.counts[l.key] !== t.lists[l.key].length) issues.push(`${unit} tracking ${l.key} count ${t.counts[l.key]} ≠ ${t.lists[l.key].length} rows`); });
+    const tol = 1 - 3 / 100;
+    const dbGraphs = await loadJobGraphs(dbJobs.filter((j) => !(j.isForecast && Number(j.subJobCount) > 0)));
+    const shippedOf = (g) => sum(g.shipments.filter((s) => ['Shipped', 'Delivered'].includes(s.status)), 'qty');
+    for (const g of dbGraphs) {
+      const j = g.job; const qty = num(j.orderQty);
+      const shipped = shippedOf(g); const finished = sum(g.finishing, 'passedQty'); const packed = sum(g.packing.filter((p) => p.status !== 'Draft'), 'totalQty');
+      const row = t.lists.unfinished.concat(t.lists.finishedPendingShipment, t.lists.partiallyShipped, t.lists.fullyShipped, t.lists.closedSubJobs, t.lists.subJobsReadyForClosure, t.lists.pendingPo).find((x) => x.jobNo === j.jobNo);
+      if (row && (row.shippedQty !== shipped || row.balanceToShip !== Math.max(qty - shipped, 0) || row.packedQty !== packed || row.pendingQty !== Math.max(qty - packed, 0))) issues.push(`${j.jobNo}: tracking quantities ≠ transactions (shipped ${row.shippedQty}/${shipped}, packed ${row.packedQty}/${packed})`);
+      const fgPending = !['Closed', 'Cancelled'].includes(j.status) && j.poStatus !== 'Awaiting PO' && finished >= qty * tol && shipped < qty * tol;
+      const inFg = t.lists.finishedPendingShipment.some((x) => x.jobNo === j.jobNo);
+      if (fgPending !== inFg) issues.push(`${j.jobNo}: finished-not-shipped list ${inFg ? 'includes' : 'misses'} it (finished ${finished}, shipped ${shipped} of ${qty})`);
+      if (shipped >= qty * tol && !t.lists.fullyShipped.some((x) => x.jobNo === j.jobNo)) issues.push(`${j.jobNo}: fully shipped but not in the fully shipped list`);
+      if (shipped > 0 && shipped < qty * tol && !t.lists.partiallyShipped.some((x) => x.jobNo === j.jobNo)) issues.push(`${j.jobNo}: partially shipped but not listed`);
+    }
+    if (t.lists.finishedPendingShipment.some((x) => x.fullyShipped)) issues.push(`${unit}: a fully shipped job is listed as pending shipment`);
+    if (t.lists.finishedPendingShipment.some((x) => x.packedQty > 0 && (!x.fgLocation || !x.delayReason))) issues.push(`${unit}: finished goods pending shipment without warehouse location / delay reason`);
+    if (t.lists.onHold.some((x) => !x.holdReason || !x.responsibleDept)) issues.push(`${unit}: a held job has no reason / responsible department`);
+    if (t.lists.advanceAwaitingPo.some((x) => x.poStatus !== 'Awaiting PO')) issues.push(`${unit}: a PO-backed job is listed as awaiting PO`);
+    if (t.lists.awaitingJob.some((x) => x.jobNo)) issues.push(`${unit}: an order with a job is listed as awaiting job creation`);
+    if (t.counts.newOrders !== await models.buyerOrder.countDocuments({ businessUnit: unit, isDeleted: false })) issues.push(`${unit}: new orders count ≠ buyer orders`);
+    // forecast quantities are not confirmed orders: dashboard order value only counts PO-backed jobs
+    const confirmedValue = round(sum(dbJobs.filter((j) => !(j.isForecast && Number(j.subJobCount) > 0) && j.status !== 'Cancelled' && j.poStatus !== 'Awaiting PO'), 'orderValue'));
+    if (Math.abs(dash.summary.expectedRevenue - confirmedValue) > 1) issues.push(`${unit} dashboard expected revenue ${dash.summary.expectedRevenue} ≠ PO-backed order value ${confirmedValue}`);
+    // filters: buyer, main job (incl. sub jobs), stage
+    const someBuyer = t.lists.unfinished[0]?.buyerName;
+    if (someBuyer) {
+      const fb = await api.get(`/tracking?buyer=${encodeURIComponent(someBuyer)}`);
+      if (Object.values(fb.lists).flat().some((x) => x.buyerName !== someBuyer)) issues.push(`${unit} tracking buyer filter leaks other buyers`);
+    }
+    const fm = await api.get(`/tracking?jobNo=${mainNo}`);
+    if (!fm.mainJobs.length && !fm.lists.closedSubJobs.length && !fm.lists.unfinished.length) issues.push(`${unit} tracking job filter ${mainNo} returned nothing`);
+    if (Object.values(fm.lists).flat().some((x) => x.jobNo && (x.mainJobNo || x.jobNo.split('-').slice(0, 2).join('-')) !== mainNo && x.repeatOfJobNo !== mainNo)) issues.push(`${unit} tracking job filter ${mainNo} returned other jobs`);
+    const fs2 = await api.get('/tracking?stage=fabric');
+    if (fs2.lists.unfinished.some((x) => x.pendingStage !== 'fabric')) issues.push(`${unit} tracking stage filter returned other stages`);
+    const xl = await fetch(`${BASE}/tracking/export?list=finishedPendingShipment&format=xlsx`, { headers: { Authorization: `Bearer ${tokens[unit]}` } });
+    if (!xl.ok || !String(xl.headers.get('content-type')).includes('spreadsheet')) issues.push(`${unit} tracking Excel export failed (${xl.status})`);
+    // an advance job cannot be shipped before its PO
+    const adv = t.lists.advanceAwaitingPo.find((x) => !x.isMain);
+    if (adv) {
+      const blocked = await fetch(`${BASE}/m/shipment`, { method: 'POST', headers: { Authorization: `Bearer ${tokens[unit]}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ job: adv.jobNo, mode: 'Sea', qty: 10, shipmentDate: day(30) }) });
+      if (blocked.ok) issues.push(`${unit}: shipment accepted on advance job ${adv.jobNo} awaiting PO`);
+    }
+    // Job Closure Report: every main job (with its sub jobs) reconciles, and every transaction is in a report
+    const seen = {};
+    for (const mj of dbJobs.filter((j) => !j.parentJob)) {
+      const cr = await api.get(`/jobs/${mj.jobNo}/closure-report`);
+      if (!cr.checksPassed) issues.push(`${mj.jobNo} closure report: ${cr.jobs.flatMap((x) => x.checks.filter((c) => !c.ok && !c.info).map((c) => `${x.jobNo} ${c.label} (${c.expected} vs ${c.actual})`)).join('; ')}`);
+      cr.subJobs.filter((s) => !cr.rows.some((r) => r.jobNo === s)).forEach((s) => issues.push(`${mj.jobNo} closure report has no rows for sub job ${s}`));
+      if (cr.rows.some((r) => !String(r.jobNo).startsWith(mj.jobNo))) issues.push(`${mj.jobNo} closure report lists another job's transactions`);
+      cr.rows.forEach((r) => { if (r.recordId) (seen[r.module] ||= new Set()).add(String(r.recordId)); });
+      if (mj.jobNo === mainNo) out[`${unit} ${mainNo} closure report`] = `${cr.rows.length} transactions; ${cr.jobs.map((x) => `${x.jobNo}: ${x.transactions} tx, fabric rcvd ${x.fabric.received} / issued ${x.fabric.issued} / ret ${x.fabric.returnedFromCutting + x.fabric.returnedToSupplier} / bal ${x.fabric.storeBalance}, shipped ${x.production.shipped}, cost ${x.accounts?.cost} revenue ${x.accounts?.revenue} profit ${x.accounts?.profit}, debit notes ${x.debits.count}`).join(' | ')}`;
+    }
+    for (const k of ['fabricReceipt', 'fabricAllocation', 'fabricReturn', 'fabricDebit', 'fabricTransfer', 'cutting', 'sewing', 'finishing', 'inspection', 'packing', 'shipment', 'invoice', 'payment']) {
+      const ids = (await models[k].find({ businessUnit: unit, isDeleted: false }).select('_id job').lean()).filter((x) => x.job).map((x) => String(x._id));
+      const missing = ids.filter((id) => !seen[k]?.has(id) && !(k === 'fabricTransfer'));
+      if (missing.length) issues.push(`${unit}: ${missing.length} ${k} transaction(s) missing from the job closure reports`);
+    }
+    out[`${unit} tracking`] =Object.entries(t.counts).map(([k, n]) => `${k} ${n}`).join(', ');
+    out[unit] = {
+      activeJobs: dash.summary.activeJobs, revenue: fin.revenue, cogs: fin.cogs, ebitda: fin.ebitda, ebitdaMarginPct: fin.ebitdaMarginPct,
+      netProfit: fin.netProfit, itr: inv.itr, holdingDays: inv.holdingDays, roiPct: a.roi.roiPct,
+      [mainNo]: `${m.job.status}; ${m.subJobSummary.map((x) => `${x.jobNo} ${x.status} shipped ${x.shippedQty}/${x.orderQty} profit ${x.profit ?? '-'}`).join('; ')}`,
+    };
+  }
+  // consolidated = Unit-1 + Unit-2
+  const all = await U('U1').get(`/analytics/summary?unit=ALL&${period}`);
+  if (Math.abs(all.finance.revenue - out.U1.revenue - out.U2.revenue) > 1) issues.push(`Consolidated revenue ${all.finance.revenue} ≠ U1 ${out.U1.revenue} + U2 ${out.U2.revenue}`);
+  out.ALL = { revenue: all.finance.revenue, ebitda: all.finance.ebitda };
+  // consolidated tracking = Unit-1 + Unit-2, and every one of the 15 lists has sample rows to test with
+  const tAll = await U('U1').get('/tracking?unit=ALL');
+  const t1 = await U('U1').get('/tracking'); const t2 = await U('U2').get('/tracking');
+  TRACKING_LISTS.forEach((l) => {
+    if (tAll.counts[l.key] !== t1.counts[l.key] + t2.counts[l.key]) issues.push(`Consolidated ${l.key} ${tAll.counts[l.key]} ≠ U1 ${t1.counts[l.key]} + U2 ${t2.counts[l.key]}`);
+    if (!tAll.counts[l.key]) issues.push(`Tracking list "${l.title}" has no sample rows`);
+  });
+  if (!tAll.mainJobs.length) issues.push('Main Job dashboard is empty');
+  // Report Center versions of the tracking lists filter by unit / buyer / PO / job
+  const rep = await U('U2').get('/reports/finished-not-shipped');
+  if (!rep.rows.length || rep.rows.some((x) => !x.jobNo.startsWith('U2-'))) issues.push('Report finished-not-shipped (U2) empty or mixed units');
+  const repPo = await U('U2').get('/reports/pending-po-unfinished?po=BM-PO');
+  if (repPo.rows.some((x) => !String(x.poNo).includes('BM-PO'))) issues.push('Report PO filter returned other POs');
+  return { issues, out };
 }
 
 /* ============================== main ============================== */
@@ -539,19 +1120,28 @@ async function main() {
   await bootstrap();
   const before = await inspect();
   log(`\nDatabase: ${mongoose.connection.db.databaseName}`);
-  log('Transactions (to be replaced):', Object.entries(before.counts).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(', ') || 'none');
-  log('Kept untouched:', Object.entries(before.keep).map(([k, n]) => `${k} ${n}`).join(', '));
-  log('Existing jobs:', before.jobs.map((j) => `${j.jobNo}(${j.businessUnit})`).join(' ') || 'none');
+  const list = (o) => Object.entries(o).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(', ') || 'none';
+  log('Sample / test transactions (flagged – removed):', list(before.flagged));
+  log(`Unflagged transactions (${INCLUDE_UNFLAGGED ? 'REMOVED – --include-unflagged' : 'kept'}):`, list(before.unflagged));
+  log('Notifications / documents / stock ledger:', list(Object.fromEntries(Object.keys(TX_EXTRA).map((k) => [k, before.counts[k]]))));
+  log('Kept untouched:', list(before.keep));
+  const by = (rows) => [...new Set(rows.map((j) => `${j.createdByName || '?'} ${j.createdAt ? new Date(j.createdAt).toISOString().slice(0, 16) : ''}`.slice(0, 32)))].slice(0, 6).join(' | ');
+  log('Existing jobs:', before.jobs.map((j) => `${j.jobNo}(${j.businessUnit}${j.isSampleData ? ', sample' : ''})`).join(' ') || 'none');
+  if (before.jobs.some((j) => !j.isSampleData)) log('Unflagged jobs created by / at:', by(before.jobs.filter((j) => !j.isSampleData)));
   if (!APPLY) { log('\nDry run only – re-run with --apply to back up, clean and build the sample dataset.'); await mongoose.disconnect(); return; }
 
   await backupAndClean();
   const server = await startApi();
   log('\nBuilding sample dataset through the API…');
-  const { created } = await buildDataset();
+  const startedAt = new Date(Date.now() - 1000);
+  const { created, createdMasters } = await buildDataset();
+  await markSample(startedAt, createdMasters);
+  log('\nChecking unit dashboards, reports, analytics and main job pages through the API…');
+  const apiResult = await apiChecks();
   server.close();
 
   log('\nValidating…');
-  const v = await validate(before.keep);
+  const v = await validate(before.keep, startedAt);
   const jobs = await models.orders.find({ isDeleted: false }).lean();
   const cnt = (q) => jobs.filter(q).length;
   const n = async (k, q = {}) => models[k].countDocuments({ isDeleted: false, ...q });
@@ -572,6 +1162,8 @@ async function main() {
     const p = v.profits.find((x) => x.jobNo === j.jobNo)?.p;
     log(`  ${j.jobNo.padEnd(12)} ${j.businessUnit} ${String(j.status).padEnd(15)} stage ${String(j.currentStage).padEnd(13)} ${j.buyerName} · ${j.styleNo} · ${j.orderQty} pcs${p?.revenue ? ` · revenue ${p.revenue} profit ${p.actualProfit} ROI ${p.roiPct}%` : ''}`);
   }
+  log('\nUNIT CHECKS'); Object.entries(apiResult.out).forEach(([k, val]) => log(`  ${k}: ${JSON.stringify(val)}`));
+  v.issues.push(...apiResult.issues);
   log(v.issues.length ? `\nVALIDATION ISSUES (${v.issues.length}):\n  ${v.issues.join('\n  ')}` : '\nVALIDATION: all checks passed – no duplicates, cross-unit leaks, orphans or broken references.');
   void created;
   await mongoose.disconnect();

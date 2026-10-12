@@ -38,6 +38,7 @@ export async function buildFilter(def, q = {}, { allowDeleted = false } = {}) {
     const rx = new RegExp(escapeRegex(q.buyer), 'i');
     if (def.isJob || def.jobLinked || def.fields.some((f) => f.name === 'buyer')) and.push({ buyerName: rx });
   }
+  if (q.po && (def.jobLinked || def.isJob || def.fields.some((f) => f.name === 'poNo'))) and.push({ poNo: new RegExp(escapeRegex(q.po), 'i') });
   if (q.style && (def.jobLinked || def.isJob || def.fields.some((f) => f.name === 'styleNo'))) and.push({ styleNo: new RegExp(escapeRegex(q.style), 'i') });
   if (q.department && def.department && q.department !== def.department) filter._id = null; // module belongs to another department
 

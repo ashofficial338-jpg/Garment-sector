@@ -19,7 +19,7 @@ r.get('/', permit('dashboard', 'view'), scopeFromQuery, asyncHandler(async (req,
   const in14 = new Date(today.getTime() + 14 * 86400000);
   const M = models;
 
-  const [jobs, enquiries, costings, quotations, samples, fabric, trims, cutting, sewing, finishing, inspections, shipments, invoices, payments, expenses, tnas, lines, employees, userCount, specs, boms, patterns, markers] = await Promise.all([
+  let [jobs, enquiries, costings, quotations, samples, fabric, trims, cutting, sewing, finishing, inspections, shipments, invoices, payments, expenses, tnas, lines, employees, userCount, specs, boms, patterns, markers] = await Promise.all([
     M.orders.find(live).lean(), M.enquiry.find(live).lean(), M.costing.find(live).lean(), M.quotation.find(live).lean(),
     M.sample.find(live).lean(), M.fabricBooking.find(live).lean(), M.trimBooking.find(live).lean(),
     M.cutting.find({ ...live, status: { $ne: 'Rejected' } }).lean(), M.sewing.find({ ...live, status: { $ne: 'Rejected' } }).lean(),
@@ -31,6 +31,17 @@ r.get('/', permit('dashboard', 'view'), scopeFromQuery, asyncHandler(async (req,
     M.techSpec.find(live).select('job status').lean(), M.bom.find(live).select('job status materialVariancePerPc lines.bookingRef').lean(),
     M.pattern.find(live).select('job status').lean(), M.marker.find(live).select('job status consumptionVariancePct').lean(),
   ]);
+
+  // Buyer-wise dashboard: every figure limited to one buyer's jobs
+  const buyer = String(req.query.buyer || '').trim();
+  if (buyer) {
+    jobs = jobs.filter((j) => j.buyerName === buyer);
+    const ids = new Set(jobs.map((j) => String(j._id)));
+    const mine = (rows) => rows.filter((x) => ids.has(String(x.job)));
+    [samples, fabric, trims, cutting, sewing, finishing, inspections, shipments, invoices, payments, tnas, specs, boms, patterns, markers] = [samples, fabric, trims, cutting, sewing, finishing, inspections, shipments, invoices, payments, tnas, specs, boms, patterns, markers].map(mine);
+    expenses = expenses.filter((e) => ids.has(String(e.job)));
+    [enquiries, costings, quotations] = [enquiries, costings, quotations].map((rows) => rows.filter((x) => x.buyerName === buyer));
+  }
 
   // Jobs that carry production (exclude forecast parents with sub jobs to avoid double counting)
   const leaf = jobs.filter((j) => !(j.isForecast && num(j.subJobCount) > 0) && j.status !== 'Cancelled');
@@ -44,8 +55,11 @@ r.get('/', permit('dashboard', 'view'), scopeFromQuery, asyncHandler(async (req,
   const received = sum(payments, 'amount');
   const outstanding = sum(invoices, 'outstanding');
   const overdueInv = invoices.filter((i) => num(i.outstanding) > 0 && i.dueDate && new Date(i.dueDate) < today);
-  const expectedRevenue = sum(leaf, 'orderValue');
-  const expectedProfit = sum(leaf, 'expectedProfit');
+  // advance (forecast) jobs awaiting the buyer PO are not confirmed orders: their value is shown apart
+  const advance = leaf.filter((j) => j.poStatus === 'Awaiting PO');
+  const confirmed = leaf.filter((j) => j.poStatus !== 'Awaiting PO');
+  const expectedRevenue = sum(confirmed, 'orderValue');
+  const expectedProfit = sum(confirmed, 'expectedProfit');
 
   // actual profit across jobs that have revenue
   let actualProfit = 0; let actualRevenue = 0; let actualCost = 0;
@@ -74,6 +88,8 @@ r.get('/', permit('dashboard', 'view'), scopeFromQuery, asyncHandler(async (req,
     expectedProfit: round(expectedProfit), actualProfit: round(actualProfit),
     readyToClose: active.filter((j) => j.readyToClose).length,
     closedJobs: leaf.filter((j) => j.status === 'Closed').length,
+    advanceJobs: advance.filter((j) => j.status !== 'Closed').length,
+    forecastQty: sum(advance, 'orderQty'), forecastValue: round(sum(advance, 'orderValue')),
   };
 
   // Pipeline
@@ -189,7 +205,7 @@ r.get('/', permit('dashboard', 'view'), scopeFromQuery, asyncHandler(async (req,
   const months = [...Array(12)].map((_, i) => monthKey(new Date(now.getFullYear(), now.getMonth() - 11 + i, 15)));
   const monthly = months.map((m) => ({
     month: m,
-    orders: round(sum(leaf.filter((j) => j.orderDate && monthKey(j.orderDate) === m), 'orderValue')),
+    orders: round(sum(confirmed.filter((j) => j.orderDate && monthKey(j.orderDate) === m), 'orderValue')),
     invoiced: round(sum(invoices.filter((i) => i.invoiceDate && monthKey(i.invoiceDate) === m), 'totalAmount')),
     collected: round(sum(payments.filter((p) => p.paymentDate && monthKey(p.paymentDate) === m), 'amount')),
   }));
@@ -201,7 +217,7 @@ r.get('/', permit('dashboard', 'view'), scopeFromQuery, asyncHandler(async (req,
     return { day: d.slice(5), target: sum(rows, 'targetQty'), actual: sum(rows, 'actualQty'), cut: sum(cutting.filter((c) => dayKey(c.entryDate) === d), 'cutQty'), efficiency: a ? round((e / a) * 100, 1) : 0 };
   });
   const buyerMap = {};
-  leaf.forEach((j) => { buyerMap[j.buyerName || '—'] = (buyerMap[j.buyerName || '—'] || 0) + num(j.orderValue); });
+  confirmed.forEach((j) => { buyerMap[j.buyerName || '—'] = (buyerMap[j.buyerName || '—'] || 0) + num(j.orderValue); });
   const buyers = Object.entries(buyerMap).map(([name, value]) => ({ name, value: round(value) })).sort((a, b) => b.value - a.value).slice(0, 8);
   const lineMap = {};
   sewing.forEach((s) => {
@@ -222,6 +238,12 @@ r.get('/', permit('dashboard', 'view'), scopeFromQuery, asyncHandler(async (req,
       fabricShortages: fabric.filter((f) => num(f.shortageQty) > 0 && f.status !== 'Fabric Job Closed').slice(0, 10).map((f) => ({ _id: f._id, refNo: f.refNo, jobNo: f.jobNo, fabricType: f.fabricType, requiredQty: f.requiredQty, receivedQty: f.receivedQty, shortageQty: f.shortageQty, unit: f.unit, deliveryDate: f.deliveryDate })),
       overdueInvoices: overdueInv.slice(0, 10).map((i) => ({ _id: i._id, invoiceNo: i.invoiceNo, jobNo: i.jobNo, buyerName: i.buyerName, outstanding: i.outstanding, dueDate: i.dueDate, currency: i.currency })),
       recentJobs: [...leaf].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 8).map(jobRow),
+      // pending activities: T&A activities overdue or due in the next 7 days on open jobs
+      pendingActivities: tnas.filter((t) => active.some((j) => String(j._id) === String(t.job)))
+        .flatMap((t) => (t.activities || []).filter((a) => !a.actualDate && a.plannedDate && new Date(a.plannedDate) <= new Date(today.getTime() + 7 * 86400000))
+          .map((a) => ({ _id: `${t._id}-${a.activity}`, tna: t._id, jobNo: t.jobNo, activity: a.activity, department: a.department, plannedDate: a.plannedDate, delayDays: Math.max(Math.round((today - new Date(a.plannedDate)) / 86400000), 0) })))
+        .sort((x, y) => new Date(x.plannedDate) - new Date(y.plannedDate)).slice(0, 12),
+      buyers: [...new Set(jobs.map((j) => j.buyerName).filter(Boolean))].sort(),
     },
   });
 }));

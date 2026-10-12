@@ -1,4 +1,4 @@
-import { text, area, n, sel, bool, date, flow } from './dsl.js';
+import { text, area, n, sel, bool, date, table, flow } from './dsl.js';
 import { CURRENCIES, DEPARTMENTS } from '../constants.js';
 
 const active = flow(['Active', 'Inactive'], { Inactive: ['Active'] });
@@ -15,7 +15,13 @@ export const buyer = {
     sel('currency', 'Default Currency', CURRENCIES, { default: 'USD' }),
     text('paymentTerms', 'Payment Terms'), text('agent', 'Buying Agent'),
     n('commissionPct', 'Commission %', { max: 100 }),
-    area('address', 'Address'),
+    text('buyerGroup', 'Buyer Group', { filter: true }),
+    sel('shippingTerms', 'Shipping Terms (Incoterm)', ['FOB', 'CIF', 'CFR', 'EXW', 'FCA', 'DDP', 'DAP', 'CPT'], { default: 'FOB' }),
+    n('creditDays', 'Credit Days'), n('creditLimit', 'Credit Limit'),
+    area('address', 'Billing Address', { section: 'Addresses' }),
+    area('shippingAddress', 'Shipping / Delivery Address'),
+    text('portOfDischarge', 'Port of Discharge'), text('notifyParty', 'Notify Party'),
+    table('contacts', 'Buyer Contacts', [text('name', 'Name'), text('role', 'Role'), text('email', 'Email'), text('phone', 'Phone')], { section: 'Contacts' }),
   ],
 };
 
@@ -34,9 +40,9 @@ export const supplier = {
 };
 
 export const MASTER_TYPES = [
-  'Garment Type', 'Product Category', 'Size', 'Color', 'Fabric', 'Trim', 'Operation', 'Machine',
-  'Cost Component', 'Currency', 'Unit', 'Payment Term', 'Shipment Term', 'Country', 'Department',
-  'Production Line', 'Floor', 'Wastage Rule',
+  'Garment Type', 'Product Category', 'Style', 'Season', 'Buyer Group', 'Size', 'Color', 'Fabric', 'Fabric Composition', 'Trim', 'Accessory',
+  'Operation', 'Machine', 'Process', 'Quality Parameter', 'Defect Type', 'Warehouse', 'Location', 'Cost Component', 'Currency', 'Tax Rate',
+  'Unit', 'Payment Term', 'Shipment Term', 'Shipment Method', 'Expense Category', 'Costing Template', 'Country', 'Port', 'Department', 'Production Line', 'Floor', 'Wastage Rule',
 ];
 
 export const master = {

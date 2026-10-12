@@ -10,7 +10,8 @@ export const DEFAULT_WORKFLOW = LIFECYCLE_STAGES.map((s) => ({
   enabled: true,
   approvalRequired: ['costing', 'quotation', 'spec', 'bom', 'pattern', 'marker', 'sampling', 'approval', 'planning', 'inspection'].includes(s.key),
   requiredDocuments: s.key === 'documentation' ? [...REQUIRED_SHIPPING_DOCS] : [],
-  requiredForClosure: ['cutting', 'sewing', 'finishing', 'packing', 'inspection', 'shipment', 'documentation', 'accounts', 'payment'].includes(s.key),
+  // mandatory closure flow: Fabric → Cutting → Sewing → Quality → Finishing → Packing → Shipment → Accounts → Profitability
+  requiredForClosure: ['fabric', 'cutting', 'sewing', 'finishing', 'packing', 'inspection', 'shipment', 'documentation', 'accounts', 'payment', 'profit'].includes(s.key),
   completionCondition: '',
 }));
 

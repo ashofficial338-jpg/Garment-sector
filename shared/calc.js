@@ -115,22 +115,26 @@ export function fabricBalance(i = {}) {
   const received = num(i.receivedQty);
   const inspected = num(i.inspectedQty);
   const approved = num(i.approvedQty);
-  const issued = num(i.issuedQty);
+  // fabric returns: rejected / excess fabric back to the supplier, unused fabric back from cutting to the store
+  const netReceived = received - num(i.returnedToSupplierQty) + num(i.adjustedQty);
+  const issued = num(i.issuedQty) - num(i.returnedFromCuttingQty);
   const used = num(i.usedQty);
   const out = {
     bookingBalance: round(Math.max(required - booked, 0), 3),
     pendingReceipt: round(Math.max(booked - received, 0), 3),
-    balanceQty: round(received - issued, 3), // stock in store
-    excessQty: round(Math.max(received - required, 0), 3),
-    shortageQty: round(Math.max(required - received, 0), 3),
+    netReceivedQty: round(netReceived, 3),
+    netIssuedQty: round(issued, 3),
+    balanceQty: round(netReceived - issued, 3), // stock in store
+    excessQty: round(Math.max(netReceived - required, 0), 3),
+    shortageQty: round(Math.max(required - netReceived, 0), 3),
     rejectedQty: round(Math.max(inspected - approved, 0), 3),
     unusedIssued: round(Math.max(issued - used, 0), 3),
-    receivedPct: pct(received, required),
+    receivedPct: pct(netReceived, required),
     issuedPct: pct(issued, required),
   };
   const checks = [
     ['Required quantity booked', booked >= required && required > 0],
-    ['Required quantity received', received >= required && required > 0],
+    ['Required quantity received', netReceived >= required && required > 0],
     ['Inspection completed', inspected >= received && received > 0],
     ['Approved quantity covers requirement', approved >= required && required > 0],
     ['Issued / consumption completed', issued >= required || used >= required],

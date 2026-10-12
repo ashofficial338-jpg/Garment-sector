@@ -374,4 +374,134 @@ ok(true, 'granted user still cannot read another unit');
 token = adminTok;
 }
 
+
+// ---------- Module structure: job type, order revision, roll-level fabric, BOM balance, defects, operators, reports ----------
+{
+const bj = await call('POST', '/jobs', { buyer: buyer._id, poNo: 'RL-PO-1', styleNo: 'RL-TS-9', product: 'Rib Tee', orderDate: '2026-09-25', orderQty: 1000, unitPrice: 5, shipmentDate: '2026-12-20', consumption: 1, consumptionUnit: 'Meter', fabricType: 'Rib Jersey', fabricRate: 2 });
+ok(bj.jobType === 'Main Job' && bj.revision === 0 && /^U1-1\d{3}$/.test(bj.jobNo), `job type ${bj.jobType}, revision ${bj.revision}, ${bj.jobNo}`);
+const rev = await call('PUT', `/jobs/${bj._id}`, { orderQty: 1100 });
+ok(rev.job.revision === 1 && rev.job.revisions[0].fields.includes('orderQty'), 'order revision 1 recorded for the quantity change');
+let bt = await call('GET', `/jobs/track/${bj.jobNo}`);
+const bfb = bt.records.fabricBooking[0];
+ok(bfb.requiredQty === 1100, `fabric requirement follows the revised order (${bfb.requiredQty} m)`);
+const rc = await call('POST', '/m/fabricReceipt', { job: bj.jobNo, booking: bfb._id, receiptDate: '2026-10-02', supplierDc: 'DC-7781', rolls: [
+  { rollNo: 'R1', lotNo: 'L-55', shade: 'A', width: 60, gsm: 200, qty: 600, points: 10 },
+  { rollNo: 'R2', lotNo: 'L-55', shade: 'A', width: 60, gsm: 200, qty: 500, points: 6 },
+  { rollNo: 'R3', lotNo: 'L-56', shade: 'B', width: 60, gsm: 200, qty: 100, points: 80 } ] });
+ok(rc.totalRolls === 3 && rc.rolls[2].result === 'Fail' && rc.passedQty === 1100 && rc.rejectedQty === 100, `4-point: roll R3 ${rc.rolls[2].pointsPer100} pts/100 sq yd fails; passed ${rc.passedQty} m`);
+await call('POST', '/m/fabricReceipt', { job: bj.jobNo, booking: bfb._id, receiptDate: '2026-10-03', rolls: [{ rollNo: 'R2', qty: 10 }] }, [409]);
+ok(true, 'the same roll cannot be received twice');
+await call('POST', '/m/fabricAllocation', { job: bj.jobNo, booking: bfb._id, allocationDate: '2026-10-04', rolls: [{ rollNo: 'R1', qty: 600 }] }, [400]);
+ok(true, 'allocation needs an approved receipt');
+for (const st of ['Inspected', 'Approved']) await call('POST', `/m/fabricReceipt/${rc._id}/status`, { status: st });
+let bk = await call('GET', `/m/fabricBooking/${bfb._id}`);
+ok(bk.receivedQty === 1200 && bk.inspectedQty === 1200 && bk.approvedQty === 1100 && bk.status === 'Approved', `booking follows the rolls: received ${bk.receivedQty}, approved ${bk.approvedQty}, status ${bk.status}`);
+await call('POST', '/m/fabricAllocation', { job: bj.jobNo, booking: bfb._id, allocationDate: '2026-10-04', rolls: [{ rollNo: 'R3', qty: 100 }] }, [400]);
+ok(true, 'a failed roll cannot be allocated');
+const al = await call('POST', '/m/fabricAllocation', { job: bj.jobNo, booking: bfb._id, allocationDate: '2026-10-04', cuttingTable: 'Table 2', rolls: [{ rollNo: 'R1', qty: 600 }] });
+ok(al.rolls[0].lotNo === 'L-55' && al.totalQty === 600, 'roll allocated with its lot');
+await call('POST', '/m/fabricAllocation', { job: bj.jobNo, booking: bfb._id, allocationDate: '2026-10-05', rolls: [{ rollNo: 'R1', qty: 1 }] }, [400]);
+ok(true, 'a roll cannot be allocated beyond its quantity');
+bk = await call('GET', `/m/fabricBooking/${bfb._id}`);
+await call('PUT', `/m/fabricBooking/${bfb._id}`, { receivedQty: 5, issuedQty: 1 });
+const bk2 = await call('GET', `/m/fabricBooking/${bfb._id}`);
+ok(bk.issuedQty === 600 && bk2.receivedQty === 1200 && bk2.issuedQty === 600, 'received / issued come from rolls and cannot be typed over');
+const bbom = await call('GET', `/m/bom/${bt.records.bom[0]._id}`);
+const bline = bbom.lines.find((l) => l.bookingRef === bfb.refNo);
+ok(bline.receivedQty === 1200 && bline.issuedQty === 600 && bline.balanceQty === 600, `BOM line: required ${bline.requiredQty} → received ${bline.receivedQty} → issued ${bline.issuedQty} → balance ${bline.balanceQty}`);
+const insp = await call('POST', '/m/inspection', { job: bj.jobNo, inspectionDate: '2026-10-06', inspectionType: 'End-line', lotSize: 1000, defectLines: [{ defectType: 'Broken stitch', severity: 'Major', count: 3 }, { defectType: 'Loose thread', severity: 'Minor', count: 4 }, { defectType: 'Stain / spot', severity: 'Minor', count: 1 }] });
+ok(insp.majorDefects === 3 && insp.minorDefects === 5 && insp.totalDefects === 8, 'end-line inspection: defects by type roll up to major 3 / minor 5');
+const sw = await call('POST', '/m/cutting', { job: bj.jobNo, entryDate: '2026-10-06', manualCutQty: 500, fabricIssued: 520, fabricUsed: 510 });
+const sew = await call('POST', '/m/sewing', { job: bj.jobNo, entryDate: '2026-10-07', line: 'Line 4', operators: 2, sam: 5, workingMinutes: 480, manualOutput: 150, operatorOutput: [{ empCode: 'E-101', operatorName: 'S. Kavitha', operation: 'Side seam', smv: 0.8, pieces: 420 }] });
+ok(sw.cutQty === 500 && sew.operatorOutput[0].effPct === 70, `operator production: ${sew.operatorOutput[0].operatorName} ${sew.operatorOutput[0].effPct}% efficiency`);
+const shpB = await call('GET', `/m/shipment/${shp._id}`);
+ok(shpB.balanceQty === 50, `shipment shows the order balance (${shpB.balanceQty} pcs)`);
+const R = async (key, q = '') => (await call('GET', `/reports/${key}${q}`)).rows;
+const jc = (await R('job-close', `?job=${bj.jobNo}`))[0];
+ok(jc && jc.mainJob === bj.jobNo && jc.fabricReceived === 1200 && jc.checklist.includes('✗ Cutting') && jc.accountsStatus === 'Not invoiced', `job close report: ${jc?.checklist.slice(0, 60)}…`);
+const closedRows = await R('closed-jobs');
+ok(closedRows.some((x) => x.jobNo === job.jobNo && x.closedByName === 'System Administrator'), 'closed job report shows closed by');
+ok((await R('pending-jobs')).some((x) => x.jobNo === bj.jobNo && x.blockers), 'pending job report lists open jobs with their blockers');
+ok((await R('main-sub')).some((x) => x.subJob && x.mainJob && x.jobType === 'Sub Job'), 'main job / sub job report');
+ok((await R('fabric-receipt', `?job=${bj.jobNo}`)).length === 3 && (await R('fabric-allocation', `?job=${bj.jobNo}`)).length === 1, 'roll-wise fabric receipt and allocation reports');
+const fc = (await R('fabric-consumption', `?job=${bj.jobNo}`))[0];
+ok(fc.cutQty === 500 && fc.actualPerPc === 1.02 && fc.variancePct === 2, `fabric consumption: planned ${fc.plannedPerPc} vs actual ${fc.actualPerPc} m/pc (${fc.variancePct}%)`);
+ok((await R('sales')).length >= 1 && (await R('accounts')).some((x) => x.jobNo === job.jobNo && x.purchaseCost > 0), 'sales and job-wise accounts reports');
+ok((await R('buyer-history')).some((x) => x.buyerName === 'Nordic Apparel AB' && x.jobs >= 2), 'buyer history report');
+ok((await R('operator-production', `?job=${bj.jobNo}`))[0]?.empCode === 'E-101', 'operator production report');
+ok((await R('dashboard')).some((x) => x.stage === 'Closed'), 'dashboard report (jobs by stage)');
+const allDash = await call('GET', '/dashboard');
+const byBuyer = await call('GET', '/dashboard?buyer=Nordic%20Apparel%20AB');
+ok(allDash.lists.buyers.includes('Nordic Apparel AB') && byBuyer.summary.activeJobs <= allDash.summary.activeJobs && Array.isArray(byBuyer.lists.pendingActivities), `buyer-wise dashboard (${byBuyer.summary.activeJobs} active jobs) with pending activities`);
+ok((await call('GET', '/lookup/master/Defect%20Type')).length >= 10 && (await call('GET', '/lookup/master/Warehouse')).length >= 3, 'defect type and warehouse masters available');
+
+// fabric returns and debit notes (Fabric Department) and the consolidated Job Closure Report
+await call('PUT', `/m/fabricBooking/${bfb._id}`, { supplier: supplier._id, supplierPoNo: 'AM/RL/77', bookingDate: '2026-09-27', bookedQty: 1100, rate: 2 });
+const ret1 = await call('POST', '/m/fabricReturn', { job: bj.jobNo, booking: bfb._id, returnType: 'Fabric Store → Supplier (rejected / excess)', returnDate: '2026-10-05', referenceDoc: 'RC-101', rollNos: 'R3', qty: 100, reason: 'Failed 4-point' });
+let fb2 = await call('GET', `/m/fabricBooking/${bfb._id}`);
+ok(ret1.amount === 200 && fb2.returnedToSupplierQty === 100 && fb2.netReceivedQty === 1100 && fb2.balanceQty === 500, `rejected roll back to the supplier: net received ${fb2.netReceivedQty}, store ${fb2.balanceQty} m`);
+await call('POST', '/m/fabricReturn', { job: bj.jobNo, booking: bfb._id, returnType: 'Fabric Store → Supplier (rejected / excess)', returnDate: '2026-10-05', referenceDoc: 'RC-102', qty: 600, reason: 'x' }, [400]);
+ok(true, 'cannot return more than the fabric in store');
+await call('POST', '/m/fabricReturn', { job: bj.jobNo, booking: bfb._id, returnType: 'Cutting → Fabric Store (unused)', returnDate: '2026-10-08', referenceDoc: 'GP-1', qty: 100, reason: 'x' }, [400]);
+ok(true, 'cannot return from cutting more than issued and not used (600 issued − 510 used)');
+await call('POST', '/m/fabricReturn', { job: bj.jobNo, booking: bfb._id, returnType: 'Cutting → Fabric Store (unused)', returnDate: '2026-10-08', referenceDoc: 'GP-1', qty: 40, reason: 'End bits' });
+fb2 = await call('GET', `/m/fabricBooking/${bfb._id}`);
+ok(fb2.returnedFromCuttingQty === 40 && fb2.netIssuedQty === 560 && fb2.balanceQty === 540, `unused fabric back from cutting: net issued ${fb2.netIssuedQty}, store ${fb2.balanceQty} m`);
+await call('POST', '/m/fabricDebit', { job: bj.jobNo, booking: bfb._id, debitDate: '2026-10-08', debitTo: 'Department – accountability', reason: 'Excess cutting wastage', qty: 5 }, [400]);
+ok(true, 'an accountability debit names the department');
+const profitBefore = await call('GET', `/jobs/${bj._id}/profit`);
+const dn = await call('POST', '/m/fabricDebit', { job: bj.jobNo, fabricReturn: ret1._id, debitDate: '2026-10-06', debitTo: 'Supplier', reason: 'Rejected fabric (4-point inspection)', otherCharges: 15 });
+ok(dn.qty === 100 && dn.rate === 2 && dn.amount === 215 && dn.costImpact === -215 && dn.supplierName, `supplier debit note ${dn.refNo}: ${dn.amount} pulled from the return (${dn.costEffect})`);
+ok((await call('GET', `/jobs/track/${bj.jobNo}`)).lifecycle.blockers.some((b) => b.includes('debit note')), 'an unsettled debit note blocks job closure');
+await call('POST', `/m/fabricDebit/${dn._id}/status`, { status: 'Accepted' });
+const profitAfter = await call('GET', `/jobs/${bj._id}/profit`);
+ok(Math.abs(profitBefore.costs.fabric - profitAfter.costs.fabric - 215) < 0.01 && (await call('GET', `/m/fabricBooking/${bfb._id}`)).debitRecovery === 215, `accepted supplier debit reduces the job fabric cost by 215 (${profitBefore.costs.fabric} → ${profitAfter.costs.fabric})`);
+const cr = await call('GET', `/jobs/${bj.jobNo}/closure-report`);
+const types = new Set(cr.rows.map((x) => x.txType));
+ok(['Job Opened', 'Order Revision', 'Fabric Purchase', 'Fabric Inward', 'Fabric Issue', 'Fabric Return', 'Fabric Debit Note', 'Cutting', 'Sewing'].every((x) => types.has(x)), `job closure report lists every transaction (${cr.rows.length} rows)`);
+ok(cr.checksPassed && cr.jobs[0].fabric.received === 1200 && cr.jobs[0].fabric.storeBalance === 540, 'job closure report reconciles fabric received / returned / issued / store balance');
+ok(cr.rows.every((x, i) => !i || new Date(x.date || 0) >= new Date(cr.rows[i - 1].date || 0)), 'transactions in date order');
+}
+
+// ---------- New Orders (buyer POs), advance jobs for repeat / forecast orders, order & job tracking ----------
+{
+  const bo = await call('POST', '/m/buyerOrder', { orderType: 'New Order', buyer: buyer._id, poNo: 'NOR-PO-9001', styleNo: 'NA-PL-900', product: 'Pique Polo', orderDate: '2026-10-01', deliveryDate: '2027-01-20', shipmentDate: '2026-12-30', orderQty: 1000, unitPrice: 6.5, color: 'White', sizeRatio: 'S:2,M:4,L:3,XL:1' });
+  ok(bo.status === 'Received' && bo.jobCreation === 'Awaiting job creation' && bo.orderValue === 6500, `buyer PO ${bo.refNo} received, awaiting job creation`);
+  await call('POST', '/m/buyerOrder', { buyer: buyer._id, poNo: 'NOR-PO-9001', styleNo: 'NA-PL-900', orderDate: '2026-10-01', deliveryDate: '2027-01-20', orderQty: 10 }, [409]);
+  ok(true, 'duplicate buyer PO / style blocked');
+  await call('POST', `/m/buyerOrder/${bo._id}/status`, { status: 'Job Created' }, [400]);
+  ok(true, '"Job Created" cannot be set by hand');
+  const t0 = await call('GET', '/tracking');
+  ok(t0.lists.awaitingJob.some((x) => x._id === bo._id) && t0.counts.newOrders === t0.lists.newOrders.length, 'tracking: PO listed under orders awaiting job creation');
+  const nj = await call('POST', `/jobs/from-buyer-order/${bo._id}`, {});
+  const boAfter = await call('GET', `/m/buyerOrder/${bo._id}`);
+  ok(/^U1-\d{4}$/.test(nj.jobNo) && nj.poNo === 'NOR-PO-9001' && nj.orderQty === 1000 && nj.sizeBreakdown.map((x) => x.qty).join() === '200,400,300,100', `job ${nj.jobNo} created from the PO with its size ratio`);
+  ok(boAfter.status === 'Job Created' && boAfter.jobNo === nj.jobNo, `buyer PO shows assigned job ${boAfter.jobNo}`);
+  await call('POST', `/jobs/from-buyer-order/${bo._id}`, {}, [400]);
+  ok(true, 'a buyer PO converts into one job only');
+
+  // advance job before the PO: not a confirmed order, cannot be shipped / invoiced
+  const adv = await call('POST', '/jobs', { buyer: buyer._id, styleNo: 'NA-PL-900', product: 'Pique Polo', poStatus: 'Awaiting PO', expectedOrderMonth: '2027-01', repeatOfJobNo: nj.jobNo, orderDate: '2026-10-10', shipmentDate: '2027-02-15', orderQty: 1200, unitPrice: 6.5 });
+  ok(adv.poStatus === 'Awaiting PO' && !adv.poNo, `advance job ${adv.jobNo} opened without a PO`);
+  const advT = await call('GET', `/jobs/track/${adv.jobNo}`);
+  ok(advT.lifecycle.stages.order === 'active' && advT.lifecycle.blockers.some((b) => b.includes('buyer PO')), 'advance job: order stage open, closure blocked until the PO arrives');
+  await call('POST', '/m/shipment', { job: adv.jobNo, mode: 'Sea', qty: 10, shipmentDate: '2027-02-15' }, [400]);
+  ok(true, 'advance job cannot be shipped before its PO');
+  const t1 = await call('GET', '/tracking');
+  ok(t1.lists.advanceAwaitingPo.some((x) => x.jobNo === adv.jobNo && x.repeatOfJobNo === nj.jobNo) && t1.lists.pendingPo.some((x) => x.jobNo === adv.jobNo) && t1.lists.repeatOrders.some((x) => x.jobNo === adv.jobNo), 'tracking: advance job in advance, pending PO and repeat order lists');
+  ok(t1.totals.forecastQty >= 1200, `forecast quantity kept apart from confirmed orders (${t1.totals.forecastQty})`);
+
+  // the actual PO arrives → linked to the advance job
+  const po2 = await call('POST', '/m/buyerOrder', { orderType: 'Repeat Order', buyer: buyer._id, poNo: 'NOR-PO-9002', styleNo: 'NA-PL-900', orderDate: '2026-10-12', deliveryDate: '2027-02-28', shipmentDate: '2027-02-10', orderQty: 1500, unitPrice: 6.6, color: 'White', sizeRatio: 'S:1,M:1', repeatOfJobNo: nj.jobNo });
+  const linked = await call('POST', `/jobs/${adv._id}/link-po`, { buyerOrder: po2._id });
+  ok(linked.job.poStatus === 'PO Received' && linked.job.poNo === 'NOR-PO-9002' && linked.job.orderQty === 1500 && linked.job.revision === 1, `actual PO linked: ${linked.job.jobNo} now ${linked.job.orderQty} pcs (rev ${linked.job.revision})`);
+  ok((await call('GET', `/m/buyerOrder/${po2._id}`)).status === 'Linked to Job', 'buyer PO marked Linked to Job');
+  await call('POST', `/jobs/${adv._id}/link-po`, { poNo: 'X' }, [400]);
+  ok(true, 'a PO-backed job cannot be linked again');
+  const t2 = await call('GET', `/tracking?jobNo=${adv.jobNo}`);
+  ok(!t2.lists.advanceAwaitingPo.length && Object.values(t2.lists).flat().every((x) => !x.jobNo || x.jobNo.startsWith(adv.jobNo)), 'tracking job filter, advance list cleared after linking');
+  const u2t = await call('GET', '/tracking?unit=U2');
+  ok(Object.values(u2t.lists).flat().every((x) => x.unit === 'U2'), 'Unit-2 tracking shows only Unit-2 rows');
+}
+
 console.log('\nALL E2E CHECKS PASSED');

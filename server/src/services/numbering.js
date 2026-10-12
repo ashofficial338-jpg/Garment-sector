@@ -1,6 +1,7 @@
 import { Counter, nextSeq } from '../models/Counter.js';
 import { getSetting } from './settings.js';
 import { currentUnit, ALL_UNITS } from './unitContext.js';
+import { models } from '../modules/builder.js';
 
 const pad = (n, d) => String(n).padStart(d, '0');
 const unitKey = (code) => `job-unit-${code}`;
@@ -25,8 +26,12 @@ export async function unitConfig(code) {
 export async function nextJobNo(unit) {
   const cfg = await unitConfig(unit);
   const key = unitKey(cfg.code);
-  // first use of the series starts at the unit's start number
-  await Counter.updateOne({ _id: key }, { $setOnInsert: { seq: Number(cfg.start) - 1 } }, { upsert: true });
+  // first use of the series starts at the unit's start number – or after the highest number already
+  // issued (deleted / cancelled jobs included) if the counter was lost, so a number is never issued twice
+  if (!(await Counter.exists({ _id: key }))) {
+    const seq = Math.max(Number(cfg.start) - 1, await highestIssuedJobNo(cfg.code));
+    await Counter.updateOne({ _id: key }, { $setOnInsert: { seq } }, { upsert: true });
+  }
   const seq = await nextSeq(key);
   return `${cfg.prefix}-${seq}`;
 }
@@ -38,11 +43,22 @@ export async function peekJobNo(unit) {
   return Math.max(c ? c.seq + 1 : Number(cfg.start), Number(cfg.start));
 }
 
-/** Admin: move a series forward (never backwards, so issued numbers are never reused). */
+/** Highest job number ever issued in a unit's series – deleted and cancelled jobs included. */
+export async function highestIssuedJobNo(unit) {
+  const cfg = await unitConfig(unit);
+  const rows = await models.orders.find({ businessUnit: cfg.code, jobNo: new RegExp(`^${cfg.prefix}-\\d+(-|$)`) }).select('jobNo').lean();
+  return rows.reduce((m, r) => Math.max(m, Number(r.jobNo.split('-')[1]) || 0), 0);
+}
+
+/**
+ * Admin: set the next number of a series. It may move forward, or back (e.g. reset to the start number
+ * after test data was removed) – but never to a number at or below one already issued, so numbers are never reused.
+ */
 export async function setNextJobNo(unit, next) {
-  const current = await peekJobNo(unit);
-  if (!(Number.isInteger(next) && next >= current)) throw new Error(`Next number must be a whole number ≥ ${current}`);
-  await Counter.updateOne({ _id: unitKey(unit) }, { $set: { seq: next - 1 } }, { upsert: true });
+  const cfg = await unitConfig(unit);
+  const floor = Math.max(Number(cfg.start), (await highestIssuedJobNo(unit)) + 1);
+  if (!(Number.isInteger(next) && next >= floor)) throw new Error(`Next number must be a whole number ≥ ${floor} (${cfg.prefix}-${floor - 1 >= Number(cfg.start) ? `${floor - 1} is already issued` : `series starts at ${cfg.start}`})`);
+  await Counter.updateOne({ _id: unitKey(cfg.code) }, { $set: { seq: next - 1 } }, { upsert: true });
   return next;
 }
 

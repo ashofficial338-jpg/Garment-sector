@@ -1,4 +1,4 @@
-import { text, area, n, calc, date, sel, ref, bool, flow } from './dsl.js';
+import { text, area, n, calc, date, sel, ref, bool, table, flow } from './dsl.js';
 import { CURRENCIES } from '../constants.js';
 import { num, round } from '../calc.js';
 import { EXPENSE_CATEGORIES } from '../costHeads.js';
@@ -14,11 +14,13 @@ export const shipment = {
     date('shipmentDate', 'Planned Ship Date', { required: true, list: true }),
     date('actualShipDate', 'Actual Ship Date'),
     n('cartons', 'Cartons', { section: 'Quantity (auto-pulled from Packing)' }), n('qty', 'Ship Qty (pcs)', { required: true, list: true }),
+    calc('balanceQty', 'Order Balance after this Shipment', { list: true }),
     n('netWeight', 'Net Weight (kg)'), n('grossWeight', 'Gross Weight (kg)'), n('cbm', 'CBM'),
     text('vesselFlight', 'Vessel / Flight', { section: 'Logistics' }), text('containerNo', 'Container No', { search: true }),
     text('blAwbNo', 'BL / AWB No', { list: true, search: true }), text('portOfLoading', 'Port of Loading'),
     text('destination', 'Destination', { list: true }), text('forwarder', 'Forwarder', { search: true }),
     date('etd', 'ETD'), date('eta', 'ETA'),
+    date('deliveredDate', 'Delivered On', { section: 'Delivery confirmation' }), text('podRef', 'Proof of Delivery / Buyer Receipt Ref'),
     area('remarks', 'Remarks'),
   ],
 };
@@ -94,4 +96,42 @@ export const expense = {
     text('billNo', 'Bill No'),
     area('remarks', 'Remarks'),
   ],
+};
+
+/* ------------------------------ Supplier Bills (accounts payable) ------------------------------ */
+/**
+ * Supplier invoices for fabric, trims, services, freight and testing, with debit / credit notes set off and payments.
+ * A bill is the PAYABLE, not an extra cost: the job cost is recognised when the goods are received (bookings, roll
+ * receipts) or the service is booked (job expenses) – so bills never double count job cost.
+ */
+export const BILL_TYPES = ['Fabric', 'Trims / Accessories', 'Service – Washing / Printing / Embroidery', 'Freight / Logistics', 'Testing', 'Other'];
+export const supplierBill = {
+  key: 'supplierBill', model: 'SupplierBill', title: 'Supplier Bills (Payables)', singular: 'Supplier Bill', group: 'Shipping & Finance', icon: 'Wallet',
+  department: 'Accounts & Finance', prefix: 'SB', jobLinked: 'optional', stage: 'accounts',
+  ...flow(['Received', 'Verified', 'Approved'], { Received: ['Disputed'], Verified: ['Disputed'], Disputed: ['Verified'] }), defaultStatus: 'Received',
+  fields: [
+    ref('supplier', 'Supplier', 'Supplier', { required: true, section: 'Bill' }),
+    text('billNo', 'Supplier Invoice No', { required: true, list: true, search: true }),
+    date('billDate', 'Invoice Date', { required: true, list: true }), date('dueDate', 'Due Date', { list: true }),
+    sel('billType', 'Bill Type', BILL_TYPES, { required: true, list: true, filter: true }),
+    ref('fabricBooking', 'Fabric Booking', 'FabricBooking', { jobScoped: true }),
+    text('poRef', 'Supplier PO / Booking Ref', { search: true }),
+    text('description', 'Description'),
+    n('qty', 'Qty', { section: 'Amount' }), text('unit', 'Unit'), n('rate', 'Rate'),
+    calc('amount', 'Amount'), n('taxPct', 'Tax %', { max: 100 }), calc('taxAmount', 'Tax'), calc('totalAmount', 'Bill Total', { list: true }),
+    n('debitNoteAdjusted', 'Debit / Credit Notes Set Off', { hint: 'Supplier debit notes settled by a credit note against this bill' }),
+    text('debitNoteRefs', 'Debit / Credit Note Refs'),
+    table('payments', 'Payments to Supplier', [date('date', 'Date'), sel('mode', 'Mode', ['Bank transfer', 'Cheque', 'LC', 'Cash']), text('reference', 'Reference'), n('amount', 'Amount')], { section: 'Payments' }),
+    calc('paidAmount', 'Paid', { list: true }), calc('outstanding', 'Outstanding', { list: true }),
+    calc('paymentStatus', 'Payment Status', { type: 'text', list: true }),
+    area('remarks', 'Remarks'),
+  ],
+  compute(d) {
+    const amount = round(num(d.qty) * num(d.rate));
+    const taxAmount = round((amount * num(d.taxPct)) / 100);
+    const totalAmount = round(amount + taxAmount);
+    const paidAmount = round((d.payments || []).reduce((t, p) => t + num(p.amount), 0));
+    const outstanding = round(totalAmount - num(d.debitNoteAdjusted) - paidAmount);
+    return { amount, taxAmount, totalAmount, paidAmount, outstanding, paymentStatus: outstanding <= 0.005 ? 'Paid' : paidAmount > 0 || num(d.debitNoteAdjusted) > 0 ? 'Part paid' : 'Unpaid' };
+  },
 };

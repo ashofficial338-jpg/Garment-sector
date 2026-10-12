@@ -20,6 +20,7 @@ export const DASHBOARDS = {
   quality: { title: 'Quality', sections: ['quality', 'production'] },
   shipment: { title: 'Shipment & Documentation', sections: ['shipment', 'quality'] },
   accounts: { title: 'Accounts & Finance', sections: ['accounts', 'finance'] },
+  profitability: { title: 'Profitability', sections: ['finance', 'accounts', 'production'] },
   hr: { title: 'HR', sections: ['hr'] },
 };
 
@@ -169,13 +170,20 @@ export default function Dashboard({ focus }) {
   const { user, can } = useAuth();
   const unitName = useUnitName();
   const [scope, setScope] = useState('');
+  const [buyer, setBuyer] = useState('');
+  const [buyerList, setBuyerList] = useState([]);
   const { toast } = useFeedback();
   const nav = useNavigate();
   const t = useChartTheme();
   const [d, setD] = useState(null);
   const cfg = DASHBOARDS[focus || 'admin'];
 
-  useEffect(() => { setD(null); api.get('/dashboard', { params: { unit: scope || undefined } }).then((r) => setD(r.data)).catch((e) => toast(errMsg(e), 'err')); }, [scope]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    setD(null);
+    api.get('/dashboard', { params: { unit: scope || undefined, buyer: buyer || undefined } })
+      .then((r) => { setD(r.data); if (!buyer) setBuyerList(r.data.lists.buyers || []); })
+      .catch((e) => toast(errMsg(e), 'err'));
+  }, [scope, buyer]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!d) return <Loading />;
   const s = d.summary;
   // Dashboard KPI → analytics page → source transactions (Admin, or the explicit analytics permission)
@@ -195,10 +203,11 @@ export default function Dashboard({ focus }) {
         <div className="row-wrap" style={{ justifyContent: 'space-between' }}>
           <div>
             <h1>Good {hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening'}, {user.name.split(' ')[0]}</h1>
-            <p>{scope === 'ALL' ? 'Both units – consolidated' : (unitName(scope) || user.unit.name).toUpperCase()} · {focus ? `${cfg.title} dashboard` : 'Order to shipment overview'} · {new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
+            <p>{scope === 'ALL' ? 'Both units – consolidated' : (unitName(scope) || user.unit.name).toUpperCase()}{buyer ? ` · ${buyer}` : ''} · {focus ? `${cfg.title} dashboard` : 'Order to shipment overview'} · {new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
           </div>
           <div className="row-wrap">
             <UnitScope value={scope} onChange={setScope} style={{ height: 36, width: 'auto' }} />
+            <select value={buyer} onChange={(e) => setBuyer(e.target.value)} style={{ height: 36, width: 'auto' }} aria-label="Buyer"><option value="">All buyers</option>{buyerList.map((b) => <option key={b} value={b}>{b}</option>)}</select>
             <button className="btn" onClick={() => nav('/control-tower')}><Icon name="RadioTower" size={15} /> Track a Job</button>
             <button className="btn btn-primary" style={{ background: '#fff', color: '#312e81', borderColor: '#fff' }} onClick={() => nav('/m/orders')}><Icon name="ClipboardCheck" size={15} /> Orders</button>
           </div>
@@ -209,6 +218,7 @@ export default function Dashboard({ focus }) {
         <div className="kpis mt">
           <Kpi label="Active Jobs" value={s.activeJobs} icon="Briefcase" tone="primary" onClick={() => nav('/m/orders')} sub={`${s.closedJobs} closed`} />
           <Kpi label="Orders This Month" value={s.ordersThisMonth} icon="CalendarPlus" tone="accent" delay={30} onClick={() => nav('/m/orders')} />
+          <Kpi label="Advance Jobs (awaiting PO)" value={s.advanceJobs || 0} icon="FileWarning" tone="amber" delay={45} onClick={() => nav('/tracking')} sub={`Forecast ${fmtNum(s.forecastQty || 0)} pcs – not in confirmed orders`} />
           <Kpi label="Pending Enquiries" value={s.pendingEnquiries} icon="MessageSquareText" tone="blue" delay={60} onClick={() => nav('/m/enquiry?status=Pending')} />
           <Kpi label="Pending Costing" value={s.pendingCosting} icon="Calculator" tone="violet" delay={90} onClick={() => nav('/m/costing')} />
           <Kpi label="Pending Approvals" value={s.pendingApprovals} icon="Stamp" tone="amber" delay={120} />
@@ -360,6 +370,12 @@ export default function Dashboard({ focus }) {
             ) : <Empty icon="CheckCircle2" title="No overdue invoices" />}
           </Card>
         )}
+        <Card title="Pending activities (T&A, next 7 days and overdue)" icon="ListTodo" pad={false} actions={<Link to="/reports?r=tna" className="small">T&A report</Link>}>
+          {d.lists.pendingActivities?.length ? (
+            <table className="tbl tbl-mini"><thead><tr><th>Job</th><th>Activity</th><th>Department</th><th>Planned</th><th className="num">Late</th></tr></thead>
+              <tbody>{d.lists.pendingActivities.map((a) => <tr key={a._id} className="click" onClick={() => nav(`/m/tna/${a.tna}`)}><td className="mono link">{a.jobNo}</td><td>{a.activity}</td><td className="small">{a.department}</td><td>{fmtDate(a.plannedDate)}</td><td className="num">{a.delayDays ? <Badge tone="red" dot={false}>{a.delayDays}d</Badge> : '—'}</td></tr>)}</tbody></table>
+          ) : <Empty icon="CheckCircle2" title="Nothing pending in the next 7 days" />}
+        </Card>
         {(!focus || focus === 'admin') && (
           <Card title="Jobs ready for closure" icon="Lock" pad={false}><JobMiniTable rows={d.lists.readyToClose} empty="No jobs waiting for closure" /></Card>
         )}

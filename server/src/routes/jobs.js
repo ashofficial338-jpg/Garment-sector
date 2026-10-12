@@ -10,10 +10,12 @@ import { ApiError } from '../utils/ApiError.js';
 import { diffObjects } from '../utils/diff.js';
 import { audit, describeChanges } from '../services/audit.js';
 import { notify } from '../services/notify.js';
-import { createJob, convertQuotation, createSubJobs, propagateJobChanges, generateDownstream, ensureFabricForecast } from '../services/orderFlow.js';
-import { refreshJob, loadJobGraph, computeStages, computeProfit } from '../services/lifecycle.js';
+import { createJob, convertQuotation, createSubJobs, propagateJobChanges, generateDownstream, ensureFabricForecast, jobFromBuyerOrder, linkPoToJob } from '../services/orderFlow.js';
+import { refreshJob, loadJobGraph, loadJobGraphs, computeStages, computeProfit } from '../services/lifecycle.js';
 import { AuditLog } from '../models/AuditLog.js';
-import { num, sum } from '../../../shared/calc.js';
+import { buildJobClosureReport, CLOSURE_REGISTER_COLUMNS } from '../services/jobClosureReport.js';
+import { sendExport } from '../services/exporter.js';
+import { num, sum, round } from '../../../shared/calc.js';
 
 const r = express.Router();
 const def = MODULES.orders;
@@ -40,10 +42,16 @@ function pick(body) {
   return out;
 }
 
-/* Confirm an order directly */
+/** Advance jobs (opened before the buyer PO exists) need the orders Approve permission. */
+function guardAdvance(req, data) {
+  if (data.poStatus === 'Awaiting PO' && !can(req.perms, 'orders', 'approve')) throw ApiError.forbidden('Opening an advance job before the buyer PO needs the Orders approve permission');
+}
+
+/* Confirm an order directly – or open an advance job for a forecast / repeat order (PO Status = Awaiting PO) */
 r.post('/', permit('orders', 'create'), asyncHandler(async (req, res) => {
   const data = pick(req.body);
   if (!req.perms.isAdmin) ADMIN_ONLY_FIELDS.forEach((k) => delete data[k]); // forecast control is Admin-only
+  guardAdvance(req, data);
   const errors = validateRecord(def, applyCompute(def, data));
   if (Object.keys(errors).length) throw ApiError.badRequest('Validation failed', errors);
   const job = await createJob(data, req);
@@ -52,8 +60,26 @@ r.post('/', permit('orders', 'create'), asyncHandler(async (req, res) => {
 
 /* Quotation → Order */
 r.post('/from-quotation/:quotationId', permit('orders', 'create'), asyncHandler(async (req, res) => {
-  const job = await convertQuotation(req.params.quotationId, pick(req.body), req);
+  const data = pick(req.body);
+  if (!req.perms.isAdmin) ADMIN_ONLY_FIELDS.forEach((k) => delete data[k]);
+  guardAdvance(req, data);
+  const job = await convertQuotation(req.params.quotationId, data, req);
   res.status(201).json(await Job.findById(job._id).lean());
+}));
+
+/* New Order (buyer PO) → Job */
+r.post('/from-buyer-order/:id', permit('orders', 'create'), asyncHandler(async (req, res) => {
+  const data = pick(req.body);
+  if (!req.perms.isAdmin) ADMIN_ONLY_FIELDS.forEach((k) => delete data[k]);
+  delete data.poStatus;
+  const job = await jobFromBuyerOrder(req.params.id, data, req);
+  res.status(201).json(await Job.findById(job._id).lean());
+}));
+
+/* Actual buyer PO received for an advance job (from a New Order, or a PO No typed in) */
+r.post('/:id/link-po', permit('orders', 'edit'), asyncHandler(async (req, res) => {
+  const job = await findJob(req.params.id);
+  res.json(await linkPoToJob(job._id, req.body, req));
 }));
 
 /* Update order with impact propagation */
@@ -67,6 +93,10 @@ r.put('/:id', permit('orders', 'edit'), asyncHandler(async (req, res) => {
   const subCount = await Job.countDocuments({ parentJob: job._id, isDeleted: false });
   if (subCount && 'orderQty' in data && num(data.orderQty) !== num(before.orderQty)) {
     throw ApiError.badRequest('Main job quantity equals the sum of its sub jobs – change the sub job quantities instead');
+  }
+  if (data.poStatus === 'Awaiting PO' && before.poStatus !== 'Awaiting PO') {
+    guardAdvance(req, data);
+    if (await models.shipment.exists({ job: job._id, isDeleted: false, status: { $ne: 'Cancelled' } })) throw ApiError.badRequest('The job already has shipments – it cannot go back to Awaiting PO');
   }
   if (before.parentJob && 'orderQty' in data && num(data.orderQty) !== num(before.orderQty) && !req.perms.isAdmin) {
     throw ApiError.forbidden('Only Admin can change sub job quantity');
@@ -82,7 +112,15 @@ r.put('/:id', permit('orders', 'edit'), asyncHandler(async (req, res) => {
   if (data.buyer) job.buyerName = (await models.buyer.findById(data.buyer).lean())?.name;
   job.updatedBy = req.user._id;
   await job.save();
-  const changes = diffObjects(before, job.toObject()).filter((c) => !['stages', 'buyerName'].includes(c.field));
+  let changes = diffObjects(before, job.toObject()).filter((c) => !['stages', 'buyerName'].includes(c.field));
+  // order revision: commercial terms changed after confirmation
+  const REVISED = ['orderQty', 'unitPrice', 'shipmentDate', 'deliveryDate', 'poNo', 'styleNo', 'sizeBreakdown', 'colors', 'sizes', 'paymentTerms', 'deliveryTerms', 'destination'];
+  const revised = [...new Set(changes.map((c) => c.field.split('.')[0]).filter((f) => REVISED.includes(f)))];
+  if (revised.length) {
+    const rev = num(job.revision) + 1;
+    await Job.updateOne({ _id: job._id }, { $set: { revision: rev }, $push: { revisions: { rev, at: new Date(), byName: req.user.name, fields: revised, reason: String(req.body._revisionReason || '').slice(0, 300) } } });
+    changes = [...changes, { field: 'revision', old: rev - 1, new: rev }];
+  }
   if (changes.length) await audit(req, { action: 'UPDATE', module: 'orders', record: job, changes, message: describeChanges(req.user.name, def, changes) });
   const impact = changes.length ? await propagateJobChanges(job.toObject(), changes, req) : [];
   // sub jobs follow main job edits for shared fields
@@ -118,8 +156,24 @@ r.get('/track/:key', permit('jobs', 'view'), asyncHandler(async (req, res) => {
   const pickRows = (rows, fields) => rows.map((x) => Object.fromEntries(['_id', 'refNo', 'jobNo', 'status', ...fields].map((k) => [k, x[k]])));
   const parent = job.parentJob ? await Job.findById(job.parentJob).select('jobNo orderQty status forecastQty').lean() : null;
   const timeline = await AuditLog.find({ jobNo: { $in: [job.jobNo, ...g.subJobs.map((s) => s.jobNo)] } }).sort({ createdAt: -1 }).limit(60).lean();
+  // Main job dashboard: every sub job's own fabric, production, shipment, cost and profit
+  const subJobSummary = g.subJobs.length ? (await loadJobGraphs(g.subJobs)).map((sg) => {
+    const s = sg.job;
+    const p = profit ? computeProfit(sg) : null;
+    const ship = sg.shipments.filter((x) => ['Shipped', 'Delivered'].includes(x.status));
+    return {
+      _id: s._id, jobNo: s.jobNo, poNo: s.poNo, color: (s.colors || [])[0] || s.fabricColor, sizeRatio: (s.sizeBreakdown || []).map((b) => `${b.size}:${b.qty}`).join(', '),
+      orderQty: s.orderQty, shipmentDate: s.shipmentDate, status: s.status, currentStage: s.currentStage, progressPct: s.progressPct,
+      fabricRequired: round(sum(sg.fabric, 'requiredQty'), 2), fabricBooked: round(sum(sg.fabric, 'bookedQty'), 2),
+      fabricReceived: round(sum(sg.fabric, 'receivedQty'), 2), fabricIssued: round(sum(sg.fabric, 'issuedQty'), 2), fabricUnit: sg.fabric[0]?.unit,
+      cutQty: sum(sg.cutting, 'cutQty'), sewnQty: sum(sg.sewing, 'actualQty'), finishedQty: sum(sg.finishing, 'passedQty'), packedQty: sum(sg.packing, 'totalQty'),
+      shippedQty: sum(ship, 'qty'), shipmentStatus: sg.shipments.length ? sg.shipments.map((x) => x.status).join(', ') : 'Not booked',
+      ...(p ? { cost: p.totalExpenses, revenue: p.revenue, profit: p.actualProfit, roiPct: p.roiPct } : {}),
+      closedAt: s.closedAt,
+    };
+  }) : [];
   res.json({
-    job, parent, lifecycle, profit, timeline,
+    job, parent, lifecycle, profit, timeline, subJobSummary,
     records: {
       enquiry: pickRows(g.enquiries, ['enquiryDate', 'expectedQty']),
       costing: pickRows(g.costings, ['totalCostPerPc', 'sellingPrice', 'profitPct']),
@@ -132,6 +186,8 @@ r.get('/track/:key', permit('jobs', 'view'), asyncHandler(async (req, res) => {
       ppMeeting: pickRows(g.ppm, ['meetingDate', 'fabricStatus', 'trimStatus']),
       fabricBooking: pickRows(g.fabric, ['fabricType', 'color', 'unit', 'requiredQty', 'bookedQty', 'receivedQty', 'issuedQty', 'balanceQty', 'shortageQty', 'closureVerdict']),
       trimBooking: pickRows(g.trims, ['item', 'bookingQty', 'receivedQty', 'shortageQty']),
+      fabricReceipt: pickRows(g.receipts, ['receiptDate', 'fabric', 'unit', 'supplierDc', 'totalRolls', 'totalQty', 'passedQty', 'rejectedQty']),
+      fabricAllocation: pickRows(g.allocations, ['allocationDate', 'fabric', 'unit', 'cuttingTable', 'totalRolls', 'totalQty']),
       fabricForecast: pickRows(g.forecasts, ['fabricType', 'color', 'unit', 'lotNo', 'forecastQty', 'receivedQty', 'transferredQty', 'balanceQty', 'excessQty', 'requiredDate']),
       fabricTransfer: pickRows(g.transfers, ['transferDate', 'fabric', 'qty', 'unit', 'fromUnit', 'toUnit', 'toJobNo', 'jobNo', 'reason', 'referenceDoc', 'destinationBooking', 'createdByName']),
       sample: pickRows(g.samples, ['sampleType', 'sentDate', 'buyerApprovalDate', 'revision']),
@@ -148,6 +204,17 @@ r.get('/track/:key', permit('jobs', 'view'), asyncHandler(async (req, res) => {
       documents: g.docs.map((d) => ({ _id: d._id, refNo: d.refNo, docType: d.docType, title: d.title, currentVersion: d.currentVersion, jobNo: d.jobNo })),
     },
   });
+}));
+
+/* Consolidated Job Closure Report: every transaction of the main job and its sub jobs + reconciliation (JSON / xlsx / csv) */
+r.get('/:id/closure-report', permit('jobs', 'view'), asyncHandler(async (req, res) => {
+  const job = (await findJob(req.params.id)).toObject();
+  const withMoney = can(req.perms, 'profit', 'view');
+  const rep = await buildJobClosureReport(job, { withMoney });
+  if (!req.query.format || req.query.format === 'json') return res.json(rep);
+  if (!can(req.perms, 'reports', 'export')) throw ApiError.forbidden('Export permission required');
+  await audit(req, { action: 'EXPORT', module: 'jobs', record: job, message: `${req.user.name} exported the Job Closure Report of ${rep.main.jobNo} (${rep.rows.length} transactions)` });
+  await sendExport(res, req.query.format, CLOSURE_REGISTER_COLUMNS.filter((c) => withMoney || !['rate', 'amount', 'costImpact', 'revenueImpact'].includes(c.key)), rep.rows, `job-closure-${rep.main.jobNo}`);
 }));
 
 /* Profit analysis */
@@ -214,7 +281,7 @@ r.post('/:id/close', permit('jobs', 'close'), asyncHandler(async (req, res) => {
   }
   const from = fresh.status;
   await Job.updateOne({ _id: job._id }, {
-    $set: { status: 'Closed', closedAt: new Date(), closedBy: req.user._id, closureRemarks: req.body.remarks || reason, readyToClose: false },
+    $set: { status: 'Closed', closedAt: new Date(), closedBy: req.user._id, closedByName: req.user.name, closureRemarks: req.body.remarks || reason, readyToClose: false },
     $push: { statusHistory: { from, to: 'Closed', by: req.user._id, byName: req.user.name, reason, override } },
   });
   await audit(req, { action: override ? 'OVERRIDE' : 'CLOSE', module: 'jobs', record: job, reason, changes: [{ field: 'status', old: from, new: 'Closed' }], message: `${req.user.name} closed job ${job.jobNo}${override ? ` with override (${fresh.closureBlockers.join('; ')})` : ''}` });

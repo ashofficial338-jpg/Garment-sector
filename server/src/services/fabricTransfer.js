@@ -57,7 +57,7 @@ export async function executeTransfer(transferId, req) {
   if (t.createSubJob) {
     const forecast = await models.fabricForecast.findById(t.sourceForecast).lean();
     const pcs = num(t.subJobQty) || Math.floor(num(t.qty) / Math.max(num(forecast.consumption) * (1 + num(forecast.wastagePct) / 100), 1e-9));
-    const [sub] = await createSubJobs(source._id, [{ orderQty: pcs, shipmentDate: t.subJobShipmentDate || source.shipmentDate, orderDate: t.transferDate }], req);
+    const [sub] = await createSubJobs(source._id, [{ orderQty: pcs, shipmentDate: t.subJobShipmentDate || source.shipmentDate, orderDate: t.transferDate, jobType: 'Transfer Sub Job' }], req);
     const booking = await models.fabricBooking.findOne({ job: sub._id, isDeleted: false }).lean();
     if (!booking) throw ApiError.badRequest('Sub job was created without a fabric booking (no fabric on the main job)');
     dest = { job: sub.toObject ? sub.toObject() : sub, booking };

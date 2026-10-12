@@ -12,12 +12,12 @@ import * as stock from './stock.js';
 import * as preproduction from './preproduction.js';
 
 const ordered = [
-  commercial.enquiry, commercial.costing, commercial.quotation, commercial.orders,
+  commercial.enquiry, commercial.costing, commercial.quotation, commercial.buyerOrder, commercial.orders,
   preproduction.techSpec, preproduction.bom, preproduction.pattern, preproduction.marker,
-  planning.tna, planning.ppMeeting, planning.fabricForecast, planning.fabricBooking, planning.fabricTransfer, planning.trimBooking,
+  planning.tna, planning.ppMeeting, planning.fabricForecast, planning.fabricBooking, planning.fabricReceipt, planning.fabricAllocation, planning.fabricReturn, planning.fabricDebit, planning.fabricTransfer, planning.trimBooking,
   stock.yarnReceipt, stock.knitting, stock.fabricProcess, planning.sample, planning.productionPlan,
   production.cutting, production.sewing, production.finishing, production.packing, production.inspection,
-  finance.shipment, finance.invoice, finance.payment, finance.expense,
+  finance.shipment, finance.invoice, finance.payment, finance.expense, finance.supplierBill,
   masters.buyer, masters.supplier, masters.master, masters.employee,
 ];
 
@@ -39,7 +39,8 @@ export function validateRecord(def, doc) {
   const check = (f, v, path) => {
     if (f.readOnly) return;
     const empty = v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0);
-    if (f.required && empty) { errors[path] = `${f.label} is required`; return; }
+    const required = f.required && (!f.requiredIf || f.requiredIf(doc));
+    if (required && empty) { errors[path] = `${f.label} is required`; return; }
     if (empty) return;
     if (f.type === 'number') {
       const n = Number(v);

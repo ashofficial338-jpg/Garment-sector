@@ -48,10 +48,15 @@ const EXTENSIONS = {
     expectedCost: Number,
     outstandingApproved: { type: Boolean, default: false },
     outstandingApprovedBy: { type: ObjectId, ref: 'User' },
+    closedByName: String,
+    // order revision log: each change of quantity, price, dates, PO or breakdown after confirmation
+    revisions: [{ _id: false, rev: Number, at: Date, byName: String, fields: [String], reason: String }],
   },
   quotation: { quoteGroup: { type: String, index: true }, supersededBy: { type: ObjectId, ref: 'Quotation' } },
   fabricBooking: { closedAt: Date, closedBy: { type: ObjectId, ref: 'User' }, readyToClose: Boolean, fromBom: Boolean },
   trimBooking: { fromBom: Boolean },
+  // the job created from (or linked to) this buyer PO
+  buyerOrder: { job: { type: ObjectId, ref: 'Job', index: true }, linkedAt: Date },
   // where a completed transfer went (the destination may be in the other unit)
   fabricTransfer: { toJob: { type: ObjectId, ref: 'Job', index: true }, toBooking: { type: ObjectId, ref: 'FabricBooking' }, completedAt: Date },
 };
@@ -71,6 +76,8 @@ export function buildSchema(def) {
     createdBy: { type: ObjectId, ref: 'User' },
     createdByName: String,
     updatedBy: { type: ObjectId, ref: 'User' },
+    // Sample / test data (created by the sample data tool) – shown as such and removable without touching live records
+    isSampleData: { type: Boolean, index: true },
   };
 
   if (def.jobLinked) {

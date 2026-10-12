@@ -1,6 +1,6 @@
 import { text, area, n, calc, date, sel, ref, table, bool, flow } from './dsl.js';
 import { UNITS, DEFAULT_UNITS } from '../constants.js';
-import { fabricRequirement, fabricBalance, trimRequirement, tnaRowState, dailyTarget, addWorkingDays, num, round, pct } from '../calc.js';
+import { fabricRequirement, fabricBalance, trimRequirement, tnaRowState, dailyTarget, addWorkingDays, num, round, pct, sum } from '../calc.js';
 import { TRIM_ITEMS } from './commercial.js';
 
 /* ------------------------------ T&A ------------------------------ */
@@ -98,6 +98,10 @@ export const fabricBooking = {
     n('receivedQty', 'Received Qty', { section: 'Receipt / Inspection / Issue', list: true }),
     n('inspectedQty', 'Inspected Qty'), n('approvedQty', 'Approved Qty'),
     n('issuedQty', 'Issued to Cutting'), n('usedQty', 'Used / Consumed'),
+    calc('returnedToSupplierQty', 'Returned to Supplier', { hint: 'From Fabric Returns' }), calc('returnedFromCuttingQty', 'Returned from Cutting', { hint: 'From Fabric Returns' }),
+    calc('adjustedQty', 'Stock Adjustment (+/−)', { hint: 'Physical count differences' }),
+    calc('netReceivedQty', 'Net Received'), calc('netIssuedQty', 'Net Issued'),
+    calc('debitRecovery', 'Supplier Debit Notes', { hint: 'Accepted / adjusted debit notes – reduce the fabric cost' }),
     calc('bookingBalance', 'Booking Balance', { section: 'Balance' }), calc('pendingReceipt', 'Pending Receipt'),
     calc('balanceQty', 'Store Balance', { list: true }), calc('excessQty', 'Excess Qty'), calc('shortageQty', 'Shortage Qty', { list: true }),
     calc('rejectedQty', 'Rejected Qty'), calc('receivedPct', 'Received %'),
@@ -116,7 +120,7 @@ export const fabricBooking = {
     const bal = fabricBalance({ ...d, requiredQty: req.requiredQty });
     return {
       baseQty: req.baseQty, totalLossPct: req.totalLossPct, requiredQty: req.requiredQty,
-      bookingBalance: bal.bookingBalance, pendingReceipt: bal.pendingReceipt, balanceQty: bal.balanceQty,
+      bookingBalance: bal.bookingBalance, pendingReceipt: bal.pendingReceipt, balanceQty: bal.balanceQty, netReceivedQty: bal.netReceivedQty, netIssuedQty: bal.netIssuedQty,
       excessQty: bal.excessQty, shortageQty: bal.shortageQty, rejectedQty: bal.rejectedQty, receivedPct: bal.receivedPct,
       bookingValue: round(num(d.bookedQty) * num(d.rate)), actualValue: round(num(d.receivedQty) * num(d.rate)),
       closureVerdict: d.status === 'Fabric Job Closed' ? 'CLOSED' : bal.closureVerdict,
@@ -139,6 +143,7 @@ export const trimBooking = {
     n('wastagePct', 'Wastage %', { max: 100 }),
     calc('requiredQty', 'Required Qty', { list: true }), calc('bookingQty', 'Booking Qty (incl. wastage)', { list: true }),
     ref('supplier', 'Supplier', 'Supplier', { section: 'Booking' }),
+    date('bookingDate', 'Trim PO Date'),
     text('supplierPoNo', 'Trim PO No'), date('deliveryDate', 'Delivery Date'),
     n('bookedQty', 'Booked Qty'), n('rate', 'Rate'),
     n('receivedQty', 'Received Qty', { section: 'Movement', list: true }), n('issuedQty', 'Issued Qty'), n('usedQty', 'Used Qty'),
@@ -221,6 +226,7 @@ export const fabricForecast = {
     calc('forecastQty', 'Fabric Forecast Qty', { list: true }),
     date('requiredDate', 'Required Date', { required: true, list: true }),
     ref('supplier', 'Mill / Supplier', 'Supplier', { section: 'Purchase & Receipt' }),
+    date('poDate', 'Fabric PO Date'),
     text('supplierPoNo', 'Fabric PO No', { search: true }),
     text('lotNo', 'Lot / Batch No', { search: true, list: true }),
     n('rate', 'Rate / unit'),
@@ -276,4 +282,114 @@ export const fabricTransfer = {
     text('referenceDoc', 'Reference Document', { required: true, search: true }),
     area('remarks', 'Remarks'),
   ],
+};
+
+/* ------------------------------ Fabric Receipt (lot / roll / 4-point inspection) ------------------------------ */
+/** 4-point system: points per 100 sq yd = points × 3600 ÷ (length yd × cuttable width in). Over 40 = fail. */
+const pointsPer100 = (r, unit) => {
+  const yd = unit === 'Yard' ? num(r.qty) : unit === 'Meter' ? num(r.qty) * 1.0936 : 0;
+  return yd && num(r.width) ? round((num(r.points) * 3600) / (yd * num(r.width)), 1) : 0;
+};
+export const fabricReceipt = {
+  key: 'fabricReceipt', model: 'FabricReceipt', title: 'Fabric Receipt (Lot / Roll)', singular: 'Fabric Receipt', group: 'Materials', icon: 'PackageOpen',
+  department: 'Fabric Department', prefix: 'FR', jobLinked: true, stage: 'fabric',
+  ...flow(['Received', 'Inspected', 'Approved'], { Received: ['Rejected'], Inspected: ['Rejected'] }), defaultStatus: 'Received',
+  fields: [
+    ref('booking', 'Fabric Booking', 'FabricBooking', { jobScoped: true, section: 'Receipt', hint: 'Receive against the job booking – or against the main job forecast below' }),
+    ref('forecast', 'or Fabric Forecast (main job)', 'FabricForecast', { jobScoped: true }),
+    date('receiptDate', 'Receipt Date', { required: true, list: true }),
+    text('supplierDc', 'Supplier DC / Invoice No', { search: true, list: true }),
+    text('vehicleNo', 'Vehicle / Docket No'),
+    text('warehouse', 'Fabric Store / Warehouse'),
+    calc('fabric', 'Fabric', { type: 'text', list: true }), calc('unit', 'Unit', { type: 'text' }),
+    table('rolls', 'Rolls', [
+      text('rollNo', 'Roll No'), text('lotNo', 'Lot / Batch'), text('shade', 'Shade'), n('width', 'Width (in)'), n('gsm', 'GSM'),
+      n('qty', 'Qty'), n('points', '4-Point Defects'), calc('pointsPer100', 'Pts / 100 sq yd'), sel('result', 'Result', ['Pass', 'Fail']), text('location', 'Rack / Bin'),
+    ], { section: 'Rolls & 4-point inspection', hint: 'Over 40 points / 100 sq yd fails automatically (metre / yard fabric)' }),
+    calc('totalRolls', 'Rolls', { section: 'Totals', list: true }), calc('totalQty', 'Received Qty', { list: true }),
+    calc('passedQty', 'Passed Qty', { list: true }), calc('rejectedQty', 'Rejected Qty'),
+    area('remarks', 'Remarks'),
+  ],
+  compute(d) {
+    const rolls = (d.rolls || []).map((r) => {
+      const pp = pointsPer100(r, d.unit);
+      return { ...r, pointsPer100: pp, result: pp > 40 ? 'Fail' : r.result || 'Pass' }; // over 40 points always fails
+    });
+    const ok = rolls.filter((r) => r.result !== 'Fail');
+    return { rolls, totalRolls: rolls.length, totalQty: round(sum(rolls, 'qty'), 3), passedQty: round(sum(ok, 'qty'), 3), rejectedQty: round(sum(rolls, 'qty') - sum(ok, 'qty'), 3) };
+  },
+};
+
+/* ------------------------------ Fabric Allocation (roll-wise issue to cutting) ------------------------------ */
+export const fabricAllocation = {
+  key: 'fabricAllocation', model: 'FabricAllocation', title: 'Fabric Allocation (Issue to Cutting)', singular: 'Fabric Allocation', group: 'Materials', icon: 'Split',
+  department: 'Fabric Department', prefix: 'FA', jobLinked: true, stage: 'fabric',
+  ...flow(['Allocated', 'Issued to Cutting'], { Allocated: ['Cancelled'] }), defaultStatus: 'Allocated',
+  fields: [
+    ref('booking', 'Fabric Booking', 'FabricBooking', { required: true, jobScoped: true, section: 'Allocation' }),
+    date('allocationDate', 'Allocation Date', { required: true, list: true }),
+    text('cuttingTable', 'Cutting Table / Lay'),
+    calc('fabric', 'Fabric', { type: 'text', list: true }), calc('unit', 'Unit', { type: 'text' }),
+    table('rolls', 'Rolls allocated', [text('rollNo', 'Roll No'), calc('lotNo', 'Lot', { type: 'text' }), n('qty', 'Allocated Qty')], { hint: 'Only rolls passed in an approved Fabric Receipt of this booking; a roll cannot be allocated beyond its quantity' }),
+    calc('totalRolls', 'Rolls', { list: true }), calc('totalQty', 'Allocated Qty', { list: true }),
+    area('remarks', 'Remarks'),
+  ],
+  compute: (d) => ({ totalRolls: (d.rolls || []).length, totalQty: round(sum(d.rolls, 'qty'), 3) }),
+};
+
+/* ------------------------------ Fabric Return & Stock Adjustment ------------------------------ */
+export const RETURN_TO_STORE = 'Cutting → Fabric Store (unused)';
+export const RETURN_TO_SUPPLIER = 'Fabric Store → Supplier (rejected / excess)';
+/** Physical stock count differences in the fabric store (booking only): shortage takes stock out, excess adds it. */
+export const ADJUST_SHORT = 'Stock adjustment – shortage (count)';
+export const ADJUST_EXCESS = 'Stock adjustment – excess (count)';
+export const fabricReturn = {
+  key: 'fabricReturn', model: 'FabricReturn', title: 'Fabric Return / Adjustment', singular: 'Fabric Return / Adjustment', group: 'Materials', icon: 'RotateCcw',
+  department: 'Fabric Department', prefix: 'FRN', jobLinked: true, stage: 'fabric',
+  ...flow(['Returned', 'Accepted'], { Returned: ['Cancelled'] }), defaultStatus: 'Returned',
+  fields: [
+    sel('returnType', 'Type', [RETURN_TO_STORE, RETURN_TO_SUPPLIER, ADJUST_SHORT, ADJUST_EXCESS], { required: true, list: true, filter: true, section: 'Return' }),
+    ref('booking', 'Fabric Booking', 'FabricBooking', { jobScoped: true, hint: 'Return against the job booking – or, for rejected bulk rolls, the main job forecast' }),
+    ref('forecast', 'or Fabric Forecast (main job)', 'FabricForecast', { jobScoped: true }),
+    date('returnDate', 'Return Date', { required: true, list: true }),
+    text('referenceDoc', 'Return Challan / Gate Pass / Count Sheet No', { required: true, search: true, list: true }),
+    text('rollNos', 'Roll / Lot Nos'),
+    calc('fabric', 'Fabric', { type: 'text', list: true }), calc('unit', 'Unit', { type: 'text' }),
+    n('qty', 'Return Qty', { required: true, list: true }), n('rate', 'Rate / unit', { hint: 'Blank = booking / forecast rate' }),
+    calc('amount', 'Value', { list: true }),
+    text('reason', 'Reason', { required: true }),
+    area('remarks', 'Remarks'),
+  ],
+  compute: (d) => ({ amount: round(num(d.qty) * num(d.rate)) }),
+};
+
+/* ------------------------------ Fabric Debit Note (raised by the Fabric Department) ------------------------------ */
+export const DEBIT_TO = ['Supplier', 'Job – additional charge', 'Department – accountability'];
+export const DEBIT_REASONS = ['Rejected fabric (4-point inspection)', 'Short receipt', 'GSM / width deviation', 'Shade variation', 'Late delivery', 'Re-processing / re-dyeing charges', 'Additional freight', 'Excess cutting wastage', 'Other'];
+/** What a debit note does to the job cost: supplier debits recover cost, additional charges add to it, accountability debits only record responsibility. */
+export const debitCostImpact = (d) => (d.debitTo === 'Supplier' ? -1 : d.debitTo === DEBIT_TO[1] ? 1 : 0) * num(d.amount);
+export const fabricDebit = {
+  key: 'fabricDebit', model: 'FabricDebit', title: 'Fabric Debit Notes', singular: 'Fabric Debit Note', group: 'Materials', icon: 'ReceiptText',
+  department: 'Fabric Department', prefix: 'FDN', jobLinked: true, stage: 'fabric',
+  ...flow(['Raised', 'Accepted', 'Adjusted'], { Raised: ['Rejected', 'Cancelled'] }), defaultStatus: 'Raised',
+  fields: [
+    date('debitDate', 'Debit Date', { required: true, list: true, section: 'Debit' }),
+    sel('debitTo', 'Debit To', DEBIT_TO, { required: true, list: true, filter: true }),
+    sel('reason', 'Reason', DEBIT_REASONS, { required: true, list: true }),
+    ref('booking', 'Fabric Booking', 'FabricBooking', { jobScoped: true }),
+    ref('forecast', 'or Fabric Forecast (main job)', 'FabricForecast', { jobScoped: true }),
+    ref('fabricReturn', 'Fabric Return', 'FabricReturn', { jobScoped: true, hint: 'Return the debit is raised for (quantity and rate are pulled)' }),
+    ref('supplier', 'Supplier', 'Supplier', { hint: 'Required for a supplier debit – pulled from the booking / forecast' }),
+    text('debitParty', 'Debited Department', { hint: 'For accountability debits, e.g. Cutting' }),
+    calc('fabric', 'Fabric', { type: 'text' }), calc('unit', 'Unit', { type: 'text' }),
+    n('qty', 'Qty', { section: 'Amount' }), n('rate', 'Rate / unit'), n('otherCharges', 'Other Charges', { hint: 'Freight, testing, handling' }),
+    calc('amount', 'Debit Amount', { list: true }), calc('costImpact', 'Job Cost Impact'), calc('costEffect', 'Cost Effect', { type: 'text', list: true }),
+    text('referenceDoc', 'Supplier Credit Note / Adjustment Ref', { search: true }),
+    area('remarks', 'Remarks'),
+  ],
+  compute(d) {
+    const amount = round(num(d.qty) * num(d.rate) + num(d.otherCharges));
+    const costImpact = round(debitCostImpact({ ...d, amount }));
+    return { amount, costImpact, costEffect: costImpact < 0 ? 'Recovery – reduces job cost' : costImpact > 0 ? 'Charge – adds to job cost' : 'Accountability only' };
+  },
 };

@@ -1,6 +1,9 @@
 import { text, area, n, calc, date, sel, ref, table, flow } from './dsl.js';
 import { parseRatio, efficiency, dhu, packingTotals, aqlEvaluate, aqlSampleSize, AQL_LEVELS, num, round, pct, sum } from '../calc.js';
 
+/** Standard garment defect list for defect entry (also kept as a Defect Type master list). */
+export const DEFECT_TYPES = ['Broken stitch', 'Skip stitch', 'Open seam', 'Uneven stitch', 'Puckering', 'Uneven hem', 'Stain / spot', 'Shade variation', 'Hole / fabric damage', 'Measurement out of tolerance', 'Wrong / missing label', 'Loose thread', 'Pressing / crease', 'Print / embroidery defect', 'Other'];
+
 const entryFlow = flow(['Submitted', 'Approved'], { Submitted: ['Rejected'], Rejected: ['Submitted'] });
 
 /* ------------------------------ Cutting ------------------------------ */
@@ -51,6 +54,7 @@ export const sewing = {
     n('inputQty', 'Line Input (pcs)', { section: 'Production' }),
     n('targetQty', 'Day Target', { list: true }),
     table('hourly', 'Hourly Production', [text('hour', 'Hour'), n('target', 'Target'), n('output', 'Output')]),
+    table('operatorOutput', 'Operator Production', [text('empCode', 'Emp Code'), text('operatorName', 'Operator'), text('operation', 'Operation'), n('smv', 'SMV'), n('pieces', 'Pieces'), calc('effPct', 'Eff %')]),
     n('manualOutput', 'Output (if no hourly)'),
     calc('actualQty', 'Actual Output', { list: true }),
     calc('variance', 'Target Variance'),
@@ -66,6 +70,7 @@ export const sewing = {
     const actual = hourly || num(d.manualOutput);
     return {
       actualQty: actual,
+      operatorOutput: (d.operatorOutput || []).map((o) => ({ ...o, effPct: pct(num(o.pieces) * num(o.smv), d.workingMinutes || 480, 1) })),
       variance: actual - num(d.targetQty),
       efficiencyPct: efficiency({ output: actual, sam: d.sam, operators: d.operators, workingMinutes: d.workingMinutes }),
       dhu: dhu(d.defects, d.checkedQty || actual),
@@ -81,7 +86,7 @@ export const finishing = {
   ...entryFlow, defaultStatus: 'Submitted',
   fields: [
     date('entryDate', 'Date', { required: true, list: true }),
-    sel('process', 'Process', ['Thread Trimming', 'Ironing', 'Washing', 'Checking', 'Folding', 'Tagging', 'All']),
+    sel('process', 'Process', ['Thread Trimming', 'Washing / Processing', 'Ironing', 'Checking', 'Folding', 'Tagging', 'Final Finishing', 'Finishing Inspection', 'All']),
     text('color', 'Color'),
     n('inputQty', 'Input Qty', { required: true, list: true }),
     n('passedQty', 'Passed Qty', { list: true }),
@@ -103,6 +108,7 @@ export const packing = {
   ...flow(['Draft', 'Packed', 'Verified']), defaultStatus: 'Draft',
   fields: [
     date('packingDate', 'Packing Date', { required: true, list: true }),
+    n('plannedQty', 'Planned Pack Qty (packing plan)'), n('plannedCartons', 'Planned Cartons'),
     sel('packingMethod', 'Packing Method', ['Solid Color Solid Size', 'Solid Color Assorted Size', 'Assorted Color Assorted Size']),
     table('rows', 'Carton Details', [
       text('color', 'Color'), text('ratio', 'Size Ratio'), n('cartonFrom', 'Ctn From'), n('cartonTo', 'Ctn To'),
@@ -113,11 +119,15 @@ export const packing = {
     calc('totalCartons', 'Total Cartons', { list: true }), calc('totalQty', 'Total Qty', { list: true }),
     calc('totalNetWeight', 'Net Weight (kg)'), calc('totalGrossWeight', 'Gross Weight (kg)', { list: true }),
     calc('totalCbm', 'CBM', { list: true }),
+    calc('balanceToPack', 'Balance to Pack (vs plan)'),
+    text('warehouse', 'Finished Goods Warehouse', { section: 'Finished goods inward' }), text('location', 'FG Location / Rack', { list: true }),
+    text('barcodeRange', 'Carton Barcode / SSCC Range'),
     area('remarks', 'Remarks'),
   ],
+  prefill: (job) => ({ plannedQty: job.orderQty }),
   compute(d) {
     const t = packingTotals(d.rows || []);
-    return { ...t, rows: t.rows };
+    return { ...t, rows: t.rows, balanceToPack: num(d.plannedQty) ? Math.max(num(d.plannedQty) - t.totalQty, 0) : 0 };
   },
 };
 
@@ -129,19 +139,25 @@ export const inspection = {
   defaultStatus: 'Pending',
   fields: [
     date('inspectionDate', 'Inspection Date', { required: true, list: true }),
-    sel('inspectionType', 'Type', ['Inline', 'Mid-line', 'Pre-final', 'Final', 'Re-inspection'], { default: 'Final', list: true }),
+    sel('inspectionType', 'Type', ['Inline', 'End-line', 'Mid-line', 'Pre-final', 'Final', 'Re-inspection'], { default: 'Final', list: true }),
     text('inspector', 'Inspector', { list: true }), text('inspectionAgency', 'Agency / Buyer QA'),
     n('lotSize', 'Lot Size (pcs)', { required: true }),
     sel('majorAql', 'Major AQL', AQL_LEVELS, { default: '2.5' }), sel('minorAql', 'Minor AQL', AQL_LEVELS, { default: '4.0' }),
     n('inspectionQty', 'Inspection Qty (blank = AQL sample)'),
     calc('sampleSize', 'AQL Sample Size'),
-    n('criticalDefects', 'Critical Defects', { section: 'Defects' }), n('majorDefects', 'Major Defects'), n('minorDefects', 'Minor Defects'),
+    table('defectLines', 'Defect Entry (by defect type)', [sel('defectType', 'Defect Type', DEFECT_TYPES), sel('severity', 'Severity', ['Critical', 'Major', 'Minor'], { default: 'Minor' }), text('location', 'Operation / Location'), n('count', 'Count')], { section: 'Defects', hint: 'When defects are entered here, the critical / major / minor totals are calculated from them' }),
+    n('criticalDefects', 'Critical Defects'), n('majorDefects', 'Major Defects'), n('minorDefects', 'Minor Defects'),
     calc('majorAccept', 'Major Ac'), calc('minorAccept', 'Minor Ac'),
     calc('totalDefects', 'Total Defects', { list: true }), calc('defectRate', 'Defect %'),
-    n('passQty', 'Pass Qty'), n('failQty', 'Fail Qty'),
+    n('passQty', 'Pass Qty'), n('failQty', 'Fail Qty'), n('reworkQty', 'Rework Qty'), n('rejectQty', 'Reject Qty'),
     calc('aqlResult', 'AQL Result', { type: 'text', list: true }),
     area('remarks', 'Remarks'),
   ],
   prefill: (job) => ({ lotSize: job.orderQty, sampleSize: aqlSampleSize(job.orderQty) }),
-  compute: (d) => aqlEvaluate(d),
+  compute(d) {
+    const lines = (d.defectLines || []).filter((l) => num(l.count) > 0);
+    const sev = (s) => sum(lines.filter((l) => l.severity === s), 'count');
+    const totals = lines.length ? { criticalDefects: sev('Critical'), majorDefects: sev('Major'), minorDefects: sev('Minor') } : {};
+    return { ...totals, ...aqlEvaluate({ ...d, ...totals }) };
+  },
 };
