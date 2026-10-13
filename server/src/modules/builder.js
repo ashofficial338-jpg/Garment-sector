@@ -59,6 +59,11 @@ const EXTENSIONS = {
   buyerOrder: { job: { type: ObjectId, ref: 'Job', index: true }, linkedAt: Date },
   // where a completed transfer went (the destination may be in the other unit)
   fabricTransfer: { toJob: { type: ObjectId, ref: 'Job', index: true }, toBooking: { type: ObjectId, ref: 'FabricBooking' }, completedAt: Date },
+  // daily department entries consolidated automatically from hourly production sheets (no re-entry)
+  sewing: { autoPosted: { type: Boolean, index: true }, consolidationKey: { type: String, index: true }, sourceSheets: [{ type: ObjectId, ref: 'HourlyProduction' }] },
+  finishing: { autoPosted: { type: Boolean, index: true }, consolidationKey: { type: String, index: true }, sourceSheets: [{ type: ObjectId, ref: 'HourlyProduction' }] },
+  hourlyProduction: { consolidatedTo: { module: String, refNo: String, id: ObjectId } },
+  qcRework: { releasedAt: Date, releasedById: { type: ObjectId, ref: 'User' }, closedAt: Date },
 };
 
 export function buildSchema(def) {

@@ -19,6 +19,8 @@ export const DEFAULTS = {
   units: DEFAULT_UNITS,
   subJob: { prefix: 'S', digits: 2 }, // U1-1000-S01
   tolerance: { shortShipPct: 3, overCutPct: 5, overShipPct: 0 },
+  // labour & overhead absorption: normal monthly output (garments) per unit; below it the under-recovery is a period cost
+  costing: { normalMonthlyOutput: { U1: 12000, U2: 12000 }, standardWorkingDays: 26 },
   workflow: DEFAULT_WORKFLOW,
   notifications: { tnaDelay: true, fabricShortage: true, trimShortage: true, approvalPending: true, productionDelay: true, qualityFailure: true, shipmentDelay: true, paymentDue: true, paymentDueDays: 7, jobReadyToClose: true },
   company: { name: 'Garment ERP', address: '', phone: '', email: '', baseCurrency: 'USD' },

@@ -13,6 +13,9 @@ import { FABRIC_FLOW } from '../../../shared/modules/planning.js';
 import { PATTERN_FLOW } from '../../../shared/modules/preproduction.js';
 import { COST_HEADS, COST_BUCKETS, financeLineOf } from '../../../shared/costHeads.js';
 import { num, sum, round, pct, profitAnalysis } from '../../../shared/calc.js';
+import { allocations, jobAllocation } from './costAllocation.js';
+import { loadRoutes, resolveRoute, computeFlow } from './factoryFlow.js';
+import { DEFAULT_UNITS } from '../../../shared/constants.js';
 
 const D = 'done', A = 'active', L = 'delayed', P = 'pending', NA = 'na';
 const today = () => new Date(new Date().toDateString());
@@ -29,6 +32,7 @@ const GRAPH_SOURCES = [
   ['cutting', 'cutting', { status: { $ne: 'Rejected' } }], ['sewing', 'sewing', { status: { $ne: 'Rejected' } }], ['finishing', 'finishing', { status: { $ne: 'Rejected' } }],
   ['packing', 'packing'], ['inspections', 'inspection'], ['shipments', 'shipment', { status: { $ne: 'Cancelled' } }],
   ['invoices', 'invoice', { status: { $ne: 'Cancelled' } }], ['payments', 'payment'], ['expenses', 'expense', { status: { $ne: 'Rejected' } }],
+  ['hourly', 'hourlyProduction', { status: { $ne: 'Rejected' } }], ['reworks', 'qcRework'], ['factoryExpenses', 'factoryExpense', { status: 'Approved' }],
 ];
 
 /**
@@ -44,6 +48,8 @@ export async function loadJobGraphs(jobs) {
   const refIds = (field) => jobs.map((j) => j[field]).filter(Boolean);
   const commercial = (key, field) => models[key].find({ isDeleted: false, $or: [{ job: { $in: allIds } }, { _id: { $in: refIds(field) } }] }).lean();
 
+  const units = [...new Set(jobs.map((j) => j.businessUnit).filter(Boolean))];
+  const [alloc, routes] = await Promise.all([allocations(units.length ? units : DEFAULT_UNITS.map((u) => u.code)), loadRoutes()]);
   const results = await Promise.all([
     // transfers are listed on the source job and on the job that received the fabric
     ...GRAPH_SOURCES.map(([, key, extra = {}]) => models[key].find(key === 'fabricTransfer'
@@ -59,7 +65,7 @@ export async function loadJobGraphs(jobs) {
     const mine = new Set(ids.map(String));
     const pick = (rows) => rows.filter((r) => mine.has(String(r.job)));
     const pickCommercial = (rows, field) => rows.filter((r) => mine.has(String(r.job)) || (job[field] && String(r._id) === String(job[field])));
-    const g = { job, subJobs: subJobs.filter((s) => String(s.parentJob) === String(job._id)), ids };
+    const g = { job, subJobs: subJobs.filter((s) => String(s.parentJob) === String(job._id)), ids, alloc, route: resolveRoute(job, routes) };
     GRAPH_SOURCES.forEach(([name], i) => { g[name] = name === 'transfers' ? results[i].filter((r) => mine.has(String(r.job)) || mine.has(String(r.toJob))) : pick(results[i]); });
     return Object.assign(g, {
       docs: pick(docs),
@@ -83,38 +89,57 @@ export async function loadJobGraph(job) {
 export function computeProfit(g) {
   if (g.subJobs?.length) return consolidatedProfit(g);
   const { job } = g;
-  const shippedQty = sum(g.shipments.filter((s) => ['Shipped', 'Delivered'].includes(s.status)), 'qty');
-  const invoiced = sum(g.invoices, 'totalAmount');
-  const revenue = invoiced || shippedQty * num(job.unitPrice);
+  const shippedRows = g.shipments.filter((s) => ['Shipped', 'Delivered'].includes(s.status));
+  const shippedQty = sum(shippedRows, 'qty');
+  // a draft invoice is not revenue; an issued invoice is recognised once its shipment has sailed (FOB)
+  const issued = g.invoices.filter((i) => i.status !== 'Draft');
+  const shippedIds = new Set(shippedRows.map((s) => String(s._id)));
+  const invoiced = sum(issued, 'totalAmount');
+  const recognised = sum(issued.filter((i) => !i.shipment || shippedIds.has(String(i.shipment))), 'totalAmount');
+  const revenue = recognised || (issued.length ? 0 : shippedQty * num(job.unitPrice));
   const costing = g.costings.find((c) => c.status === 'Approved') || g.costings[0];
   const c = costing || {};
   const qty = num(job.orderQty);
   const expectedProfit = costing ? num(costing.profitPerPc) * qty : num(job.expectedProfit);
   const expectedCost = costing ? num(costing.totalCostPerPc) * qty : num(job.expectedCost);
-  const producedQty = shippedQty || sum(g.packing, 'totalQty') || 0;
+  // pieces the cost was incurred for: everything packed into finished goods (or shipped, if more) – a part-shipped
+  // job's cost per piece is spread over all its finished goods, not only the shipped ones
+  const fgIn = sum((g.hourly || []).filter((h) => h.department === 'Finished Goods Inward'), 'completedQty');
+  const producedQty = Math.max(shippedQty, sum(g.packing, 'totalQty'), fgIn) || 0;
 
   // actual per head: booked materials + job expenses of the head's categories
   const jobCosts = g.expenses.filter((e) => !financeLineOf(e.category));
-  const actualOf = (h) => sum(jobCosts.filter((e) => h.expense.includes(e.category)), 'amount')
+  // payroll / attendance labour and factory overhead allocated to this job (see costAllocation.js)
+  const al = jobAllocation(g.alloc, job._id);
+  const allocated = {
+    labour: al.labourActual + al.labourEstimated,
+    quality: al.qualityLabourActual + al.qualityLabourEstimated + al.directQuality,
+    overhead: al.overheadActual + al.overheadEstimated + al.directOther,
+  };
+  const estimatedPart = { labour: al.labourEstimated, quality: al.qualityLabourEstimated, overhead: al.overheadEstimated };
+  const actualOf = (h) => sum(jobCosts.filter((e) => h.expense.includes(e.category)), 'amount') + num(allocated[h.key])
     // fabric = received value ± accepted debit notes (supplier recoveries reduce it, additional charges add to it)
     + (h.key === 'fabric' ? sum(g.fabric, 'actualValue') + sum(g.debits.filter((d) => ['Accepted', 'Adjusted'].includes(d.status)), 'costImpact') : 0)
     + (h.key === 'trims' ? sum(g.trims, 'actualAmount') : 0);
   const perPc = (h) => h.costing.reduce((t, k) => t + num(c[k]), 0);
   const raw = COST_HEADS.map((h) => ({ h, actual: actualOf(h), perPc: perPc(h) }));
   const bucketHasActual = Object.fromEntries(COST_BUCKETS.map((b) => [b, raw.some((x) => x.h.bucket === b && x.actual > 0)]));
+  // in-house conversion (cutting, sewing, finishing, packing) is paid through payroll and allocated as labour and
+  // overhead – its costed standard must not be charged on top of that allocation
+  if (allocated.labour + allocated.overhead > 0) bucketHasActual.production = true;
   const heads = raw.map(({ h, actual, perPc: pp }) => {
     const useStandard = !bucketHasActual[h.bucket] && costing && producedQty > 0 && pp > 0;
     return {
       key: h.key, label: h.label, bucket: h.bucket, cogs: h.cogs,
       estimated: round(pp * qty), estimatedPerPc: round(pp, 4),
       actual: round(useStandard ? pp * producedQty : actual),
-      basis: useStandard ? 'standard' : 'actual',
+      basis: useStandard ? 'standard' : num(estimatedPart[h.key]) > 0 ? 'estimated' : 'actual',
     };
   }).map((x) => ({ ...x, variance: round(x.actual - x.estimated) }));
   const bucketSum = (b) => sum(heads.filter((x) => x.bucket === b), 'actual');
   const basis = Object.fromEntries(COST_BUCKETS.map((b) => {
     const hs = heads.filter((x) => x.bucket === b);
-    return [b, hs.some((x) => x.basis === 'standard') ? 'standard' : 'actual'];
+    return [b, hs.some((x) => x.basis === 'standard') ? 'standard' : hs.some((x) => x.basis === 'estimated') ? 'estimated' : 'actual'];
   }));
 
   const pa = profitAnalysis({
@@ -144,13 +169,16 @@ export function computeProfit(g) {
     grossProfit: round(pa.revenue - cogs), netProfit: pa.actualProfit, grossMarginPct: pa.revenue ? round(((pa.revenue - cogs) / pa.revenue) * 100, 2) : 0,
     costPerPc: costQty ? round(pa.totalExpenses / costQty, 4) : 0,
     profitPerPc: (shippedQty || costQty) ? round(pa.actualProfit / (shippedQty || costQty), 4) : 0,
+    allocation: { labour: round(allocated.labour, 2), quality: round(allocated.quality, 2), overhead: round(allocated.overhead, 2), estimated: round(sum(Object.values(estimatedPart)), 2), byDept: al.byDept },
   };
 }
+
+const tot2 = (parts, k) => round(parts.reduce((t, p) => t + num(p.allocation?.[k]), 0), 2);
 
 /** A job's own slice of a (main job) graph: its records only, no sub jobs; commercial records are shared. */
 function sliceGraph(g, job) {
   const id = String(job._id);
-  const s = { job, subJobs: [], ids: [job._id], enquiries: g.enquiries, costings: g.costings, quotations: g.quotations, docs: g.docs.filter((r) => String(r.job) === id) };
+  const s = { job, subJobs: [], ids: [job._id], alloc: g.alloc, route: g.route, enquiries: g.enquiries, costings: g.costings, quotations: g.quotations, docs: g.docs.filter((r) => String(r.job) === id) };
   GRAPH_SOURCES.forEach(([name]) => { s[name] = g[name].filter((r) => String(r.job) === id || (name === 'transfers' && String(r.toJob) === id)); });
   return s;
 }
@@ -171,7 +199,8 @@ function consolidatedProfit(g) {
     const estimated = round(same.reduce((t, x) => t + num(x?.estimated), 0));
     return { ...h, actual, estimated, variance: round(actual - estimated), basis: same.some((x) => x?.basis === 'standard') ? 'standard' : 'actual' };
   });
-  out.costBasis = Object.fromEntries(COST_BUCKETS.map((b) => [b, parts.some((p) => p.costBasis?.[b] === 'standard') ? 'standard' : 'actual']));
+  out.costBasis = Object.fromEntries(COST_BUCKETS.map((b) => [b, parts.some((p) => p.costBasis?.[b] === 'standard') ? 'standard' : parts.some((p) => p.costBasis?.[b] === 'estimated') ? 'estimated' : 'actual']));
+  out.allocation = { labour: tot2(parts, 'labour'), quality: tot2(parts, 'quality'), overhead: tot2(parts, 'overhead'), estimated: tot2(parts, 'estimated'), byDept: {} };
   const costQty = out.producedQty || num(g.job.orderQty);
   Object.assign(out, {
     currency: g.job.currency, costingRef: parts[0].costingRef,
@@ -339,6 +368,18 @@ export async function computeStages(g) {
   if (openReturns.length) blockers.push(`${openReturns.length} fabric return(s) not accepted (${openReturns.map((r) => r.refNo).join(', ')})`);
   const openReservations = g.allocations.filter((a) => a.status === 'Allocated');
   if (openReservations.length) blockers.push(`${openReservations.length} fabric reservation(s) not issued or cancelled (${openReservations.map((a) => a.refNo).join(', ')})`);
+  // department flow & quality (jobs on hourly production) – every piece accounted for before closure
+  const flow = computeFlow({ job, route: g.route || resolveRoute(job, []), sheets: g.hourly || [], inspections: g.inspections, reworks: g.reworks || [], shipments: g.shipments });
+  meta.flow = { onFlow: flow.onFlow, route: flow.route.name, wip: flow.wip, fg: flow.fg, issues: flow.issues, departments: flow.departments.map((d) => ({ department: d.department, input: d.input, completed: d.completed, rejected: d.rejected, pending: d.pending, handover: d.handover })) };
+  const openIssues = (g.reworks || []).filter((r) => r.status !== 'Closed');
+  if (openIssues.length) blockers.push(`${openIssues.length} quality issue(s) not closed (${openIssues.map((r) => r.refNo).join(', ')})`);
+  const openInsp = g.inspections.filter((i) => ['Pending', 'Inspection'].includes(i.status));
+  if (openInsp.length) blockers.push(`${openInsp.length} inspection(s) not completed (${openInsp.map((i) => i.refNo).join(', ')})`);
+  if (flow.onFlow && !isMain) {
+    if (flow.wip.inDepartments > 0) blockers.push(`${flow.wip.inDepartments} pcs still in department WIP (${flow.departments.filter((d) => d.pending > 0).map((d) => `${d.department} ${d.pending}`).join(', ')})`);
+    if (flow.wip.betweenDepartments + flow.wip.atQualityGates > 0) blockers.push(`${flow.wip.betweenDepartments + flow.wip.atQualityGates} pcs not handed over / not dispositioned at quality gates`);
+    if (flow.issues.length) blockers.push(`Quantity reconciliation: ${flow.issues.join('; ')}`);
+  }
   if (isMain) {
     g.subJobs.filter((s) => s.status !== 'Closed').forEach((s) => blockers.push(`Sub job ${s.jobNo} is not closed`));
   } else {

@@ -14,6 +14,9 @@ import { DocumentFile } from '../models/Document.js';
 import { backfillLedger } from './stockLedger.js';
 import { PAYMENT_TERMS, INCOTERMS, TRIM_ITEMS } from '../../../shared/modules/commercial.js';
 import { DEFECT_TYPES } from '../../../shared/modules/production.js';
+import { SHIFTS } from '../../../shared/modules/factory.js';
+
+export const HOURLY_SLOTS = ['08:00-09:00', '09:00-10:00', '10:00-11:00', '11:00-12:00', '12:00-13:00', '13:30-14:30', '14:30-15:30', '15:30-16:30', '16:30-17:30', '17:30-18:30'];
 
 export async function ensureRoles() {
   const existing = new Map((await Role.find({ name: { $in: DEFAULT_ROLES.map((r) => r.name) } })).map((d) => [d.name, d]));
@@ -80,9 +83,19 @@ export async function ensureMasters() {
   add('Warehouse', ['Main Fabric Store', 'Trims Store', 'Finished Goods Warehouse', 'Cut Panel Store']);
   add('Location', ['Rack A', 'Rack B', 'Rack C', 'Bulk Floor', 'Quarantine']);
   add('Tax Rate', ['GST 5%', 'GST 12%', 'GST 18%', 'Zero-rated export'], (n) => ({ value: Number((n.match(/\d+/) || [0])[0]), unit: '%' }));
+  add('Shift', SHIFTS);
+  add('Hourly Slot', HOURLY_SLOTS);
+  add('Delay Reason', ['Machine breakdown', 'Power failure', 'Waiting for input / cut panels', 'Absenteeism', 'Style changeover', 'Quality issue / rework', 'Trims shortage', 'Needle / bobbin change', 'Meeting / training']);
   add('Port', ['Tuticorin', 'Chennai', 'Nhava Sheva', 'Mundra', 'Kolkata', 'Gothenburg', 'Felixstowe', 'Hamburg', 'Rotterdam', 'Los Angeles', 'Yokohama', 'Sydney']);
   const have = new Set(await models.master.distinct('masterType'));
-  const fresh = rows.filter((r) => !have.has(r.masterType)).map((r) => ({ ...r, refNo: `MST-${r.masterType.replace(/\W+/g, '').slice(0, 6).toUpperCase()}-${r.refNo.slice(4)}` }));
+  // defect types added in later releases are appended to an existing list (existing values untouched)
+  const defects = new Set(await models.master.distinct('name', { masterType: 'Defect Type' }));
+  const extraDefects = have.has('Defect Type') ? rows.filter((r) => r.masterType === 'Defect Type' && !defects.has(r.name)) : [];
+  const fresh = [
+    ...rows.filter((r) => !have.has(r.masterType)).map((r) => ({ ...r, refNo: `MST-${r.masterType.replace(/\W+/g, '').slice(0, 6).toUpperCase()}-${r.refNo.slice(4)}` })),
+    // appended values get a name-based number – positions in the default list may have shifted since the first seed
+    ...extraDefects.map((r) => ({ ...r, refNo: `MST-DEFADD-${r.name.replace(/\W+/g, '').slice(0, 16).toUpperCase()}` })),
+  ];
   if (!fresh.length) return;
   await models.master.insertMany(fresh);
   logger.info(`Seeded ${fresh.length} master data records (${[...new Set(fresh.map((r) => r.masterType))].join(', ')})`);

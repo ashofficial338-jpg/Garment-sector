@@ -10,6 +10,8 @@
  */
 import { models } from './builder.js';
 import { ApiError } from '../utils/ApiError.js';
+import { guard } from './guards.js';
+import * as factory from './factoryHooks.js';
 import { notify } from '../services/notify.js';
 import { getSetting } from '../services/settings.js';
 import { num, sum, round, efficiency } from '../../../shared/calc.js';
@@ -39,11 +41,6 @@ const others = async (key, ctx, extra = {}) => models[key].find({
   job: ctx.job._id, isDeleted: false, _id: { $ne: ctx.existing?._id }, ...extra,
 }).lean();
 
-function guard(ctx, ok, message) {
-  if (ok) return;
-  if (ctx.override) { ctx.overrideUsed = (ctx.overrideUsed || []).concat(message); return; }
-  throw ApiError.badRequest(`${message}. Requires authorised override with reason.`, { code: 'OVERRIDE_REQUIRED' });
-}
 
 /** Booking or main-job forecast a fabric return / debit note is against (exactly one, of this job); stamps fabric and unit. */
 async function fabricSource(ctx) {
@@ -517,6 +514,7 @@ export const hooks = {
   },
   sewing: {
     async beforeSave(ctx) {
+      factory.lockConsolidated(ctx, 'Sewing entry');
       const cut = sum(await models.cutting.find({ job: ctx.job._id, isDeleted: false, status: { $ne: 'Rejected' } }).lean(), 'cutQty');
       const prev = sum(await others('sewing', ctx, { status: { $ne: 'Rejected' } }), 'actualQty');
       guard(ctx, prev + num(ctx.data.actualQty) <= cut, `Sewing output (${prev + num(ctx.data.actualQty)}) exceeds cut quantity (${cut})`);
@@ -532,6 +530,7 @@ export const hooks = {
   },
   finishing: {
     async beforeSave(ctx) {
+      factory.lockConsolidated(ctx, 'Finishing entry');
       const d = ctx.data;
       guard(ctx, num(d.passedQty) + num(d.rejection) <= num(d.inputQty), 'Passed + rejected cannot exceed finishing input');
       guard(ctx, num(d.ironedQty) <= num(d.inputQty) && num(d.needleCheckedQty) <= num(d.inputQty), 'Ironed / needle-checked quantity cannot exceed finishing input');
@@ -557,7 +556,9 @@ export const hooks = {
       if (d.aqlResult && ['Inspection', 'Re-inspection'].includes(d.status) && !ctx.statusExplicit) {
         d.status = d.aqlResult === 'Passed' ? 'Passed' : 'Failed';
       }
+      await factory.inspectionRules(ctx);
     },
+    beforeStatus: (gate) => factory.inspectionStatusRules(gate),
     async afterSave(ctx) {
       const d = ctx.saved;
       const s = await getSetting('notifications');
@@ -569,6 +570,7 @@ export const hooks = {
 
   /* ---------------- Shipping & finance ---------------- */
   shipment: {
+    beforeStatus: (gate) => factory.shipmentStatusRules(gate),
     async beforeSave(ctx) {
       const d = ctx.data;
       requirePo(ctx.job, 'shipped');
@@ -629,6 +631,14 @@ export const hooks = {
     async afterSave(ctx) { await syncInvoice(ctx.saved.invoice); if (ctx.existing?.invoice && String(ctx.existing.invoice) !== String(ctx.saved.invoice)) await syncInvoice(ctx.existing.invoice); },
     async afterDelete(rec) { await syncInvoice(rec.invoice); },
   },
+  expense: { beforeSave: (ctx) => factory.expenseRules(ctx) },
+
+  /* ---------------- Factory operations (see factoryHooks.js) ---------------- */
+  hourlyProduction: factory.hourlyProduction,
+  qcRework: factory.qcRework,
+  attendance: factory.attendance,
+  payroll: factory.payroll,
+  factoryExpense: factory.factoryExpense,
 };
 
 /** Recalculate an invoice's received / outstanding / status from its payments. */

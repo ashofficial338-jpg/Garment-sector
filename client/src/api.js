@@ -70,6 +70,7 @@ export function errMsg(e) {
   return d?.message || e?.message || 'Something went wrong';
 }
 export const needsOverride = (e) => e?.response?.data?.details?.code === 'OVERRIDE_REQUIRED';
+export const needsReason = (e) => e?.response?.data?.details?.code === 'REASON_REQUIRED';
 
 /** Download a file from an authenticated endpoint. */
 export async function download(url, params, fallbackName) {

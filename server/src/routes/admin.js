@@ -200,6 +200,11 @@ r.put('/settings/:key', adminOnly, asyncHandler(async (req, res) => {
   const { key } = req.params;
   if (!(key in DEFAULTS)) throw ApiError.badRequest('Unknown setting');
   if (key === 'units') throw ApiError.badRequest('Use Units & job numbering to change units');
+  if (key === 'costing') {
+    const v = req.body.value || {};
+    const caps = Object.values(v.normalMonthlyOutput || {});
+    if (!caps.every((x) => Number.isFinite(Number(x)) && Number(x) >= 0) || !(Number(v.standardWorkingDays) >= 1 && Number(v.standardWorkingDays) <= 31)) throw ApiError.badRequest('Capacity must be 0 or more and working days between 1 and 31');
+  }
   const before = (await getAllSettings())[key];
   const value = await setSetting(key, req.body.value, req.user._id);
   await audit(req, { action: 'SETTINGS', module: 'settings', changes: [{ field: key, old: before, new: value }], message: `${req.user.name} updated ${key} settings` });

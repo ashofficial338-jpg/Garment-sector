@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { applyCompute, validateRecord, allowedTransitions } from '@shared/modules/index.js';
-import { api, errMsg, needsOverride } from '../api.js';
+import { api, errMsg, needsOverride, needsReason } from '../api.js';
 import { useAuth } from '../auth/AuthContext.jsx';
 import { useFeedback } from './Feedback.jsx';
 import { FormRenderer, RefSelect } from './FormRenderer.jsx';
@@ -72,14 +72,14 @@ export default function RecordDrawer({ def, id, initialJob, onClose, onSaved }) 
   const computed = useMemo(() => applyCompute(def, values), [def, values]);
   const set = (k, v) => setValues((s) => ({ ...s, [k]: v }));
 
-  async function save(overrideReason) {
+  async function save(overrideReason, changeReason) {
     const errs = validateRecord(def, computed);
     if (def.jobLinked === true && isNew && !job) errs._job = 'Select a Job No';
     setErrors(errs);
     if (Object.keys(errs).length) { toast('Please fix the highlighted fields', 'warn'); return; }
     setBusy(true);
     try {
-      const body = { ...values, ...(job ? { job: job._id } : {}), ...(overrideReason ? { _override: { reason: overrideReason } } : {}) };
+      const body = { ...values, ...(job ? { job: job._id } : {}), ...(overrideReason ? { _override: { reason: overrideReason } } : {}), ...(changeReason ? { _reason: changeReason } : {}) };
       let data;
       if (def.isJob) {
         if (isNew) data = (await api.post('/jobs', body)).data;
@@ -94,9 +94,12 @@ export default function RecordDrawer({ def, id, initialJob, onClose, onSaved }) 
       onSaved?.(data);
       if (isNew) { onClose(); if (def.isJob) nav(`/jobs/${data.jobNo}`); } else { setRec({ ...rec, ...data }); setValues(strip(data)); }
     } catch (e) {
-      if (needsOverride(e) && can(def.key, 'override')) {
+      if (needsReason(e)) {
+        const why = await askReason(`${errMsg(e)}. The reason is recorded in the audit trail with the old and new values.`, { title: 'Reason for change', confirmLabel: 'Save change' });
+        if (why) { setBusy(false); await save(overrideReason, why); return; }
+      } else if (needsOverride(e) && can(def.key, 'override')) {
         const reason = await askReason(`${errMsg(e)}\n\nYou have override permission. Provide a reason to proceed.`, { title: 'Authorised override', confirmLabel: 'Override & save' });
-        if (reason) { setBusy(false); await save(reason); return; }
+        if (reason) { setBusy(false); await save(reason, changeReason); return; }
       } else {
         toast(errMsg(e), 'err');
         if (e.response?.data?.details && !e.response.data.details.code) setErrors(e.response.data.details);

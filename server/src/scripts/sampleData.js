@@ -38,6 +38,7 @@ import { loadJobGraphs, computeProfit, computeStages } from '../services/lifecyc
 import { num, sum, round } from '../../../shared/calc.js';
 import { TRACKING_LISTS } from '../../../shared/tracking.js';
 import { RETURN_TO_STORE, RETURN_TO_SUPPLIER, ADJUST_SHORT, ADJUST_EXCESS } from '../../../shared/modules/planning.js';
+import { ensureWorkforce, configureQuality, flowProduction, flowPackingList, preShipment, attendanceSheets, payrolls, factoryExpenses, negativeTests } from './sampleFactory.js';
 
 const APPLY = process.argv.includes('--apply');
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -140,6 +141,8 @@ const U = (unit) => ({
 const TODAY = new Date(new Date().toISOString().slice(0, 10));
 const day = (n) => new Date(TODAY.getTime() + n * 86400000).toISOString().slice(0, 10);
 const r2 = (v) => Math.round(v * 100) / 100;
+/** First day of attendance / payroll / hourly production data (relative to today). */
+const FACTORY_FROM = -46;
 const PDF = (title) => new Blob([`%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]>>endobj\n% ${title}\ntrailer<</Root 1 0 R>>\n%%EOF`], { type: 'application/pdf' });
 
 const BUYERS = [
@@ -227,8 +230,8 @@ const JOBS = {
       forecastPlan: { supplier: 'Pioneer Knit Fabrics', supplierPoNo: 'PKF/2026/0841', lotNo: 'LOT-SJ-NV-2291', received: 5000, receivedDays: -82 },
       subJobs: [
         { qty: 800, fabric: 1000, day: -80, ship: -40, ref: 'NOR-PO-5120 call-off 1', poNo: 'NOR-PO-5120-01', color: 'Navy', stage: 'closed' },
-        { qty: 2000, fabric: 2500, day: -62, ship: -20, ref: 'NOR-PO-5120 call-off 2', poNo: 'NOR-PO-5120-02', color: 'Navy', stage: 'closed' },
-        { qty: 960, fabric: 1200, day: -45, ship: -5, ref: 'NOR-PO-5120 call-off 3', poNo: 'NOR-PO-5120-03', color: 'Navy', stage: 'closed' },
+        { qty: 2000, fabric: 2500, day: -62, ship: -20, ref: 'NOR-PO-5120 call-off 2', poNo: 'NOR-PO-5120-02', color: 'Navy', stage: 'closed', flow: true },
+        { qty: 960, fabric: 1200, day: -45, ship: -5, ref: 'NOR-PO-5120 call-off 3', poNo: 'NOR-PO-5120-03', color: 'Navy', stage: 'closed', flow: true },
       ] },
     { key: 'U1-KIDS-TEE', buyer: 'Kiwi Kids Ltd', styleNo: 'KK-TS-14', product: 'Kids Printed Crew Tee', garmentType: 'T-Shirt', poNo: 'KK-61820', destination: 'Sydney', price: 2.85, qty: 6000, stage: 'closed',
       fabric: { fabricType: 'Single Jersey 160 GSM', composition: '100% Cotton', gsm: 160, width: 66, color: 'Sky Blue', unit: 'KG', consumption: 0.14, wastagePct: 5, rate: 4.6 },
@@ -241,11 +244,11 @@ const JOBS = {
       trims: [...KNIT_TRIMS, { item: 'Button', description: 'Pearl 2-hole 16L', consumptionPerPc: 3, unit: 'Pcs', wastagePct: 4, rate: 0.015 }], sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [48, 66, 18, 17], sam: 11.5, orderDays: -95, shipDays: -6,
       costing: { trimCost: 0.26, cuttingCost: 0.07, sewingCost: 0.95, finishingCost: 0.14, packingCost: 0.08, labourCost: 0.06, factoryOverhead: 0.22, testingCost: 0.04, freightCost: 0.12, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 13 },
       expenses: [['Sewing / CMT', 0.98], ['Finishing', 0.15], ['Packing', 0.08]], payPart: 0.4 },
-    { key: 'U1-HOODIE', countAdjust: { type: ADJUST_SHORT, qty: 2.4 }, buyer: 'Urban Threads Inc', styleNo: 'UT-HD-330', product: 'Unisex Pullover Hoodie', garmentType: 'Hoodie', poNo: 'UTI-91407', destination: 'Los Angeles', price: 11.8, qty: 3500, stage: 'readyToShip',
+    { key: 'U1-HOODIE', flow: true, countAdjust: { type: ADJUST_SHORT, qty: 2.4 }, buyer: 'Urban Threads Inc', styleNo: 'UT-HD-330', product: 'Unisex Pullover Hoodie', garmentType: 'Hoodie', poNo: 'UTI-91407', destination: 'Los Angeles', price: 11.8, qty: 3500, stage: 'readyToShip',
       fabric: { fabricType: 'French Terry 300 GSM', composition: '80% Cotton 20% Polyester', gsm: 300, width: 72, color: 'Heather Grey', unit: 'KG', consumption: 0.62, wastagePct: 6, rate: 6.1 },
       trims: [...KNIT_TRIMS, { item: 'Drawcord', description: 'Flat cotton drawcord 140 cm with metal tips', consumptionPerPc: 1, unit: 'Pcs', wastagePct: 3, rate: 0.11 }], sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [60, 72, 64, 20], sam: 17.5, orderDays: -70, shipDays: 12,
       costing: { trimCost: 0.31, cuttingCost: 0.12, sewingCost: 1.55, finishingCost: 0.2, washingCost: 0.25, packingCost: 0.1, labourCost: 0.09, factoryOverhead: 0.35, testingCost: 0.05, freightCost: 0.22, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
-    { key: 'U1-HENLEY', buyer: 'Nordic Apparel AB', styleNo: 'NA-LS-610', product: "Men's Long Sleeve Henley", garmentType: 'T-Shirt', poNo: 'NOR-PO-5188', destination: 'Gothenburg', price: 5.6, qty: 5200, stage: 'sewing',
+    { key: 'U1-HENLEY', flow: true, buyer: 'Nordic Apparel AB', styleNo: 'NA-LS-610', product: "Men's Long Sleeve Henley", garmentType: 'T-Shirt', poNo: 'NOR-PO-5188', destination: 'Gothenburg', price: 5.6, qty: 5200, stage: 'sewing',
       fabric: { fabricType: 'Waffle Knit 200 GSM', composition: '100% Cotton', gsm: 200, width: 68, color: 'Olive', unit: 'KG', consumption: 0.27, wastagePct: 5, rate: 5.4 },
       trims: [...KNIT_TRIMS, { item: 'Button', description: 'Horn-look 3-button placket 18L', consumptionPerPc: 3, unit: 'Pcs', wastagePct: 4, rate: 0.02 }], sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [53, 72, 64, 17], sam: 10.2, orderDays: -60, shipDays: 35,
       costing: { trimCost: 0.24, cuttingCost: 0.07, sewingCost: 0.82, finishingCost: 0.12, packingCost: 0.07, labourCost: 0.06, factoryOverhead: 0.2, testingCost: 0.04, freightCost: 0.1, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
@@ -257,13 +260,18 @@ const JOBS = {
       fabric: { fabricType: '2x1 Rib 210 GSM', composition: '95% Cotton 5% Elastane', gsm: 210, width: 60, color: 'Black', unit: 'KG', consumption: 0.13, wastagePct: 5, rate: 5.6 },
       trims: KNIT_TRIMS, sizes: ['XS', 'S', 'M', 'L'], ratio: 'XS:2,S:3,M:3,L:2', poms: [42, 58, 0, 16], sam: 4.8, orderDays: -10, shipDays: 95,
       costing: { trimCost: 0.15, cuttingCost: 0.04, sewingCost: 0.33, finishingCost: 0.06, packingCost: 0.05, labourCost: 0.04, factoryOverhead: 0.11, testingCost: 0.03, freightCost: 0.06, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
-    { key: 'U1-SWEAT', qualityHold: true, buyer: 'Urban Threads Inc', styleNo: 'UT-SW-215', product: 'Crew Neck Sweatshirt', garmentType: 'Sweatshirt', poNo: 'UTI-91688', destination: 'Los Angeles', price: 9.2, qty: 3000, stage: 'packingPartial',
+    { key: 'U1-SWEAT', flow: true, qualityHold: true, buyer: 'Urban Threads Inc', styleNo: 'UT-SW-215', product: 'Crew Neck Sweatshirt', garmentType: 'Sweatshirt', poNo: 'UTI-91688', destination: 'Los Angeles', price: 9.2, qty: 3000, stage: 'packingPartial',
       fabric: { fabricType: 'Brushed Fleece 280 GSM', composition: '80% Cotton 20% Polyester', gsm: 280, width: 72, color: 'Charcoal', unit: 'KG', consumption: 0.52, wastagePct: 6, rate: 5.8 },
       trims: KNIT_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [58, 70, 62, 19], sam: 14.5, orderDays: -65, shipDays: 9,
       costing: { trimCost: 0.22, cuttingCost: 0.1, sewingCost: 1.25, finishingCost: 0.16, packingCost: 0.09, labourCost: 0.08, factoryOverhead: 0.3, testingCost: 0.05, freightCost: 0.18, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
+    // order → hourly production in every department → QC gates → finished goods → shipment → closure
+    { key: 'U1-FLOW', flow: true, buyer: 'Maison Lumière', styleNo: 'ML-TS-120', product: "Women's Slub Jersey Tee", garmentType: 'T-Shirt', poNo: 'ML-2026-260', destination: 'Le Havre', price: 4.9, qty: 2400, stage: 'closed',
+      fabric: { fabricType: 'Slub Single Jersey 150 GSM', composition: '100% Cotton', gsm: 150, width: 64, color: 'Ecru', unit: 'KG', consumption: 0.13, wastagePct: 5, rate: 4.8 },
+      trims: KNIT_TRIMS, sizes: ['XS', 'S', 'M', 'L'], ratio: 'XS:2,S:3,M:3,L:2', poms: [44, 62, 16, 15], sam: 6.2, orderDays: -50, shipDays: -6, payFull: true,
+      costing: { trimCost: 0.18, cuttingCost: 0.05, sewingCost: 0.5, finishingCost: 0.09, packingCost: 0.06, labourCost: 0.05, factoryOverhead: 0.16, testingCost: 0.03, freightCost: 0.08, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
   ],
   U2: [
-    { key: 'U2-MAIN', buyer: 'Bristol & Main Ltd', styleNo: 'BM-OX-140', product: "Men's Oxford Button-Down Shirt", garmentType: 'Shirt', poNo: 'BM-PO-77310', destination: 'Felixstowe', price: 8.9, qty: 6000, forecast: true,
+    { key: 'U2-MAIN', flow: true, buyer: 'Bristol & Main Ltd', styleNo: 'BM-OX-140', product: "Men's Oxford Button-Down Shirt", garmentType: 'Shirt', poNo: 'BM-PO-77310', destination: 'Felixstowe', price: 8.9, qty: 6000, forecast: true,
       fabric: { fabricType: 'Cotton Oxford 40s', composition: '100% Cotton', gsm: 135, width: 58, color: 'Light Blue', unit: 'Meter', consumption: 1.6, wastagePct: 5, rate: 2.75 },
       trims: WOVEN_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [56, 78, 64, 41], sam: 18.5, orderDays: -80, shipDays: 50,
       costing: { trimCost: 0.29, accessoriesCost: 0.11, cuttingCost: 0.1, sewingCost: 1.45, finishingCost: 0.2, washingCost: 0.18, packingCost: 0.09, labourCost: 0.08, factoryOverhead: 0.32, testingCost: 0.05, freightCost: 0.16, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 },
@@ -283,7 +291,7 @@ const JOBS = {
       trims: WOVEN_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [55, 76, 24, 40], sam: 16, orderDays: -85, shipDays: -4,
       costing: { trimCost: 0.27, accessoriesCost: 0.09, cuttingCost: 0.09, sewingCost: 1.25, finishingCost: 0.18, packingCost: 0.08, labourCost: 0.07, factoryOverhead: 0.28, testingCost: 0.05, freightCost: 0.15, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 },
       expenses: [['Sewing / CMT', 1.3], ['Finishing', 0.18]] },
-    { key: 'U2-LOUNGE', buyer: 'Bristol & Main Ltd', styleNo: 'BM-LT-118', product: "Men's Lounge Tee", garmentType: 'T-Shirt', poNo: 'BM-PO-77402', destination: 'Felixstowe', price: 4.6, qty: 2500, stage: 'cutting',
+    { key: 'U2-LOUNGE', flow: true, buyer: 'Bristol & Main Ltd', styleNo: 'BM-LT-118', product: "Men's Lounge Tee", garmentType: 'T-Shirt', poNo: 'BM-PO-77402', destination: 'Felixstowe', price: 4.6, qty: 2500, stage: 'cutting',
       fabric: { fabricType: '100% Cotton Single Jersey', composition: '100% Combed Cotton', gsm: 160, width: 60, color: 'Navy', unit: 'Meter', consumption: 1.2, wastagePct: 4, rate: 0.95 },
       trims: KNIT_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [53, 72, 21, 18], sam: 7, orderDays: -45, shipDays: 40, partialFabric: 0.88,
       costing: { trimCost: 0.19, cuttingCost: 0.06, sewingCost: 0.55, finishingCost: 0.1, packingCost: 0.07, labourCost: 0.05, factoryOverhead: 0.18, testingCost: 0.03, freightCost: 0.1, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
@@ -295,6 +303,10 @@ const JOBS = {
       fabric: { fabricType: 'Brushed Cotton Flannel', composition: '100% Cotton', gsm: 190, width: 58, color: 'Red Check', unit: 'Meter', consumption: 1.9, wastagePct: 7, rate: 3.6 },
       trims: WOVEN_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [60, 79, 66, 43], sam: 26, orderDays: -12, shipDays: 100,
       costing: { trimCost: 0.34, accessoriesCost: 0.12, cuttingCost: 0.14, sewingCost: 2.1, finishingCost: 0.26, washingCost: 0.2, packingCost: 0.11, labourCost: 0.11, factoryOverhead: 0.45, testingCost: 0.06, freightCost: 0.24, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 13 } },
+    { key: 'U2-FLOW', flow: true, buyer: 'Hamburg Outdoor GmbH', styleNo: 'HO-PL-330', product: "Men's Pique Polo", garmentType: 'Polo Shirt', poNo: 'HOG-4460-26', destination: 'Hamburg', price: 6.8, qty: 1800, stage: 'closed',
+      fabric: { fabricType: 'Cotton Pique 210 GSM', composition: '100% Cotton', gsm: 210, width: 64, color: 'Navy', unit: 'KG', consumption: 0.23, wastagePct: 5, rate: 5.1 },
+      trims: [...KNIT_TRIMS, { item: 'Button', description: 'Navy 2-hole 16L', consumptionPerPc: 3, unit: 'Pcs', wastagePct: 4, rate: 0.015 }], sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [54, 72, 22, 18], sam: 10.5, orderDays: -46, shipDays: -4, payFull: true,
+      costing: { trimCost: 0.25, cuttingCost: 0.07, sewingCost: 0.9, finishingCost: 0.13, packingCost: 0.08, labourCost: 0.06, factoryOverhead: 0.21, testingCost: 0.04, freightCost: 0.11, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
   ],
 };
 
@@ -524,14 +536,17 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
   await issueRolls(api, jobNo, main._id, store[main._id] || [], issue, ps, counters);
   // lays of up to a third of the order; fabric used per lay in proportion, total always within the fabric issued
   const maxPlies = Math.ceil(qty / pcsPerMarker / 3) + 1;
-  let cut = 0; let lay = 1;
+  let cut = 0; let lay = 1; const lays = [];
   while (cut < cutTarget) {
     const plies = Math.min(Math.ceil((cutTarget - cut) / pcsPerMarker), maxPlies);
     const pcs = plies * pcsPerMarker;
     const used = r2((issue * 0.985 * pcs) / (Math.ceil(cutTarget / pcsPerMarker) * pcsPerMarker));
     await api.post('/m/cutting', { job: jobNo, entryDate: day(ps + lay), marker: mk._id, layNo: `L-${String(lay).padStart(2, '0')}`, plies, bundleQty: Math.ceil(pcs / 20), panelQty: pcs * 5, fabricIssued: r2(used * 1.012), fabricUsed: used, rejectQty: Math.round(pcs * 0.002) });
+    lays.push({ day: ps + lay, pcs, reject: Math.round(pcs * 0.002) });
     cut += pcs; lay += 1;
   }
+  const fc = { unit, jobNo, spec, target, lays, line, operators, day, log, flowLog: counters.flowLog, inspector: unit === 'U1' ? 'QA – V. Arun' : 'QA – D. Meena', counters, pcsPerMarker, r2 };
+  if (spec.flow && target === 'cutting') await flowProduction(api, fc);
   if (target === 'cutting') {
     // the next lays' rolls are reserved on the cutting table: held in the store, issued when the lay is spread
     const next = (store[main._id] || []).filter((r) => r.left > 0.0005).slice(0, 3);
@@ -565,6 +580,7 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
       : { job: jobNo, booking: main._id, debitDate: day(ps + lay), debitTo: 'Job – additional charge', reason: 'Re-processing / re-dyeing charges', qty: r2(issue * 0.06), rate: f.unit === 'KG' ? 0.42 : 0.08, remarks: 'Re-compacting of shrinkage-failed rolls before cutting' });
     await api.status('fabricDebit', dn._id, 'Accepted');
   }
+  if (spec.flow) return flowTail(api, unit, jobNo, spec, target, ids, counters, fc, { qty, ps, f });
   // sewing – line output day by day at realistic efficiency
   const sewTarget = target === 'sewing' ? Math.round(cut * 0.45) : cut - Math.round(cut * 0.005);
   let sewn = 0; let d = ps + lay + 1;
@@ -634,9 +650,17 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
   const pk = await pack(1, fullCartons, d + 2);
   await finalInspection(pk.totalQty, d + 3);
   if (target === 'packing') return;
+  await shipAndClose(api, unit, jobNo, spec, target, ids, counters, { d, ps, explicit: null });
+}
+
+/**
+ * Shipment → delivery → documents → invoice → expenses → supplier bills → payment → fabric closure → job closure.
+ * `explicit` carries the shipped quantity / cartons for jobs on department flow (only quality-released full cartons ship).
+ */
+async function shipAndClose(api, unit, jobNo, spec, target, ids, counters, { d, ps, explicit }) {
   // shipment (pulls cartons / weights / CBM from packing)
   const shipDay = Math.min(d + 5, -1); // after packing & final inspection
-  const shp = await api.post('/m/shipment', { job: jobNo, invoiceNo: `${unit}-EXP-${jobNo.split('-').slice(1).join('')}`, mode: 'Sea', shipmentDate: day(spec.shipDays), vesselFlight: unit === 'U1' ? 'MAERSK KENSINGTON 241W' : 'CMA CGM TIGRIS 0QF4', containerNo: `MSKU${7000000 + counters.cont++}`, portOfLoading: unit === 'U1' ? 'Tuticorin' : 'Chennai', forwarder: 'Maersk Logistics', etd: day(spec.shipDays) });
+  const shp = await api.post('/m/shipment', { job: jobNo, invoiceNo: `${unit}-EXP-${jobNo.split('-').slice(1).join('')}`, mode: 'Sea', shipmentDate: day(spec.shipDays), vesselFlight: unit === 'U1' ? 'MAERSK KENSINGTON 241W' : 'CMA CGM TIGRIS 0QF4', containerNo: `MSKU${7000000 + counters.cont++}`, portOfLoading: unit === 'U1' ? 'Tuticorin' : 'Chennai', forwarder: 'Maersk Logistics', etd: day(spec.shipDays), ...(explicit || {}) });
   if (target === 'readyToShip') { await api.status('shipment', shp._id, 'Booked'); return; }
   await api.put(`/m/shipment/${shp._id}`, { actualShipDate: day(shipDay), blAwbNo: `MAEU${240000000 + counters.cont * 17}`, eta: day(shipDay + 28) });
   await api.status('shipment', shp._id, 'Booked', 'Stuffed', 'Shipped');
@@ -655,13 +679,15 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
   // a buyer claim is settled as a credit note deducted on the export invoice
   const inv = await api.post('/m/invoice', { job: jobNo, shipment: shp._id, invoiceDate: day(invDay), dueDate: day(shipDay + 46), otherCharges: 0, discount: spec.claim?.amount || 0, remarks: spec.claim ? `Credit note ${unit}-CN-${counters.bill++}: ${spec.claim.reason}` : '' });
   await api.status('invoice', inv._id, 'Issued');
-  for (const [category, perPcCost] of spec.expenses || [['Sewing / CMT', (spec.costing.sewingCost || 0.5) * 1.02], ['Finishing', spec.costing.finishingCost || 0.1]]) {
+  const SERVICE = { Printing: 'Colour Print Hub', Washing: 'Bright Wash Industries', Embroidery: 'Stitch Art Embroidery' };
+  const booked = spec.expenses || [['Sewing / CMT', (spec.costing.sewingCost || 0.5) * 1.02], ['Finishing', spec.costing.finishingCost || 0.1]];
+  // department-flow jobs: in-house labour is paid through payroll and allocated from attendance – book outside services only
+  for (const [category, perPcCost] of spec.flow ? booked.filter(([c]) => SERVICE[c]) : booked) {
     await api.post('/m/expense', { job: jobNo, category, description: `${category} – ${jobNo}`, expenseDate: day(d), amount: r2(perPcCost * shp.qty), vendor: unit === 'U1' ? 'In-house production' : 'In-house production U2', billNo: `${unit}-${category.slice(0, 3).toUpperCase()}-${counters.bill++}` });
   }
   await api.post('/m/expense', { job: jobNo, category: 'Freight', description: `Ocean freight & CHA – ${shp.invoiceNo}`, expenseDate: day(shipDay), amount: r2(shp.qty * (spec.costing.freightCost || 0.1)), vendor: 'Maersk Logistics', billNo: `ML-${counters.bill++}` });
   await api.post('/m/expense', { job: jobNo, category: 'Testing', description: 'Bulk fabric & garment testing', expenseDate: day(ps - 2), amount: 185, vendor: 'SGS Testing', billNo: `SGS-${counters.bill++}` });
   // supplier bills (payables) for the outside services booked as job expenses above – same amounts, no extra cost
-  const SERVICE = { Printing: 'Colour Print Hub', Washing: 'Bright Wash Industries', Embroidery: 'Stitch Art Embroidery' };
   const payServices = reach(target, 'readyToClose') ? 'full' : null;
   for (const [category, perPcCost] of (spec.expenses || []).filter(([c]) => SERVICE[c])) {
     await supplierBill(api, jobNo, { supplier: ids.suppliers[SERVICE[category]], billNo: `${SERVICE[category].split(' ').map((w) => w[0]).join('')}/${jobNo.split('-').slice(1).join('')}`, day: d, billType: 'Service – Washing / Printing / Embroidery', poRef: `${unit}-SPO-${counters.bill++}`, description: `${category} of ${shp.qty} pcs`, qty: shp.qty, unit: 'Pcs', rate: perPcCost, taxPct: 0, pay: payServices }, counters);
@@ -686,6 +712,51 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
   if (!tr.lifecycle.readyToClose) throw new Error(`${jobNo} not ready to close: ${tr.lifecycle.blockers.join('; ')}`);
   if (target === 'readyToClose') return; // every condition met – waiting for the closing sign-off
   await api.post(`/jobs/${tr.job._id}/close`, { remarks: 'All production, shipment, documents and payments complete' });
+}
+
+/**
+ * Department-flow job after cutting: hourly sheets in every department (sewing and finishing daily entries are
+ * consolidated from them), QC at each stage with rework, packing list = carton packing, pre-shipment release, shipment.
+ */
+async function flowTail(api, unit, jobNo, spec, target, ids, counters, fc, { qty, ps }) {
+  const { S, lastDay } = await flowProduction(api, fc);
+  if (['sewing', 'quality'].includes(target)) return;
+  const d = lastDay + 1;
+  if (target === 'packingPartial') {
+    if (S['Carton/Box Packing'].out) await flowPackingList(api, fc, S, Math.min(d, 0));
+    return;
+  }
+  const { ppc, fullCartons } = await flowPackingList(api, fc, S, Math.min(d, 0));
+  const fg = S['Finished Goods Inward'].out;
+  // only full cartons of the order ship; any surplus stays in finished goods
+  const shipCartons = Math.min(fullCartons, Math.floor(qty / ppc));
+  const shipQty = shipCartons * ppc;
+  const ctx = { ...fc, day };
+  if (target === 'partShipped') {
+    const first = Math.floor(shipCartons * 0.55);
+    await preShipment(api, ctx, first * ppc, Math.min(d + 1, -4));
+    const s1 = await api.post('/m/shipment', { job: jobNo, invoiceNo: `${unit}-EXP-${jobNo.split('-').slice(1).join('')}-1`, mode: 'Sea', shipmentDate: day(-3), qty: first * ppc, cartons: first, vesselFlight: 'CMA CGM TIGRIS 0QF6', containerNo: `MSKU${7000000 + counters.cont++}`, portOfLoading: unit === 'U1' ? 'Tuticorin' : 'Chennai', forwarder: 'Maersk Logistics', etd: day(-3) });
+    await api.put(`/m/shipment/${s1._id}`, { actualShipDate: day(-3), blAwbNo: `MAEU${240000000 + counters.cont * 17}`, eta: day(25) });
+    await api.status('shipment', s1._id, 'Booked', 'Stuffed', 'Shipped');
+    const inv = await api.post('/m/invoice', { job: jobNo, shipment: s1._id, invoiceDate: day(-2), dueDate: day(43), otherCharges: 0, discount: 0 });
+    await api.status('invoice', inv._id, 'Issued');
+    await api.post('/m/payment', { job: jobNo, invoice: inv._id, paymentDate: day(-1), amount: r2(inv.totalAmount * 0.3), mode: 'TT', reference: `TT-${counters.bill++}`, bankCharges: 20 });
+    // the balance is released by pre-shipment inspection and planned on the next sailing
+    await preShipment(api, ctx, fg - first * ppc, 0);
+    const s2 = await api.post('/m/shipment', { job: jobNo, invoiceNo: `${unit}-EXP-${jobNo.split('-').slice(1).join('')}-2`, mode: 'Sea', shipmentDate: day(spec.shipDays), qty: shipQty - first * ppc, cartons: shipCartons - first, portOfLoading: unit === 'U1' ? 'Tuticorin' : 'Chennai', forwarder: 'Maersk Logistics', etd: day(spec.shipDays), remarks: 'Balance lot – space requested on the next sailing' });
+    counters.plannedFlowShipment = { id: s2._id, jobNo };
+    return;
+  }
+  await preShipment(api, ctx, fg, Math.min(d + 1, -2));
+  if (target === 'packing') return;
+  if (target === 'readyToShip') {
+    const shp = await api.post('/m/shipment', { job: jobNo, invoiceNo: `${unit}-EXP-${jobNo.split('-').slice(1).join('')}`, mode: 'Sea', shipmentDate: day(spec.shipDays), qty: shipQty, cartons: shipCartons, vesselFlight: unit === 'U1' ? 'MAERSK KENSINGTON 241W' : 'CMA CGM TIGRIS 0QF4', containerNo: `MSKU${7000000 + counters.cont++}`, portOfLoading: unit === 'U1' ? 'Tuticorin' : 'Chennai', forwarder: 'Maersk Logistics', etd: day(spec.shipDays) });
+    await api.status('shipment', shp._id, 'Booked');
+    return;
+  }
+  counters.flowShipped = counters.flowShipped || [];
+  counters.flowShipped.push({ jobNo, day: Math.min(d + 5, -1) });
+  await shipAndClose(api, unit, jobNo, spec, target, ids, counters, { d: Math.min(d, -4), ps, explicit: { qty: shipQty, cartons: shipCartons } });
 }
 
 /* --------------------------- forecast main job: forecast → receipt → transfers → sub jobs --------------------------- */
@@ -723,7 +794,7 @@ async function runForecastJob(api, unit, job, spec, ids, counters, crossUnit) {
     await api.status('fabricTransfer', ft._id, 'Approved', 'Completed');
   }
   for (const s of subs) {
-    const sub = { ...spec, orderDays: s.day, shipDays: s.ship, qty: s.qty };
+    const sub = { ...spec, orderDays: s.day, shipDays: s.ship, qty: s.qty, flow: s.flow ?? spec.flow };
     await runJob(api, unit, s.jobNo, sub, s.stage, ids, counters);
   }
   if (spec.closeMain) {
@@ -799,6 +870,10 @@ async function buildDataset() {
     }
   }
   await sampleUsers(u1);
+  // factory set-up: routing & QC checkpoints (shared), the workforce of each unit
+  await configureQuality(u1, ids);
+  const staff = { U1: await ensureWorkforce(u1, 'U1', day, ids.createdMasters.employee), U2: await ensureWorkforce(u2, 'U2', day, ids.createdMasters.employee) };
+  counters.flowLog = [];
   const created = { U1: [], U2: [] };
   // orders in each unit, in series order
   for (const unit of ['U1', 'U2']) {
@@ -874,6 +949,33 @@ async function buildDataset() {
       log(`  ${unit} New order ${bo.refNo}  ${o.buyer} PO ${o.poNo} · ${o.styleNo} · ${o.qty} pcs (${o.orderType}) – awaiting job creation`);
     }
   }
+  // HR: daily attendance for the production window, payroll for every month that has ended; factory expenses
+  log('  Attendance, payroll and factory expenses…');
+  const factory = { attendance: 0, payrolls: [], expenses: [] };
+  for (const unit of ['U1', 'U2']) {
+    const api = unit === 'U1' ? u1 : u2;
+    factory.attendance += await attendanceSheets(api, unit, staff[unit], counters.flowLog, FACTORY_FROM, day, counters);
+    factory.payrolls.push(...await payrolls(api, unit, FACTORY_FROM, day, TODAY));
+    // third-party pre-shipment inspection of an open job (a closed job takes no new costs), outsourced repair of held goods
+    const inspected = unit === 'U1' ? created.U1.find((x) => x.spec.key === 'U1-HOODIE')?.job.jobNo : subs2[1]?.jobNo;
+    const held = unit === 'U1' ? created.U1.find((x) => x.spec.key === 'U1-SWEAT')?.job.jobNo : null;
+    factory.expenses.push(...await factoryExpenses(api, unit, day, TODAY, { inspected: inspected ? { jobNo: inspected, day: -5 } : null, repaired: held ? { jobNo: held, day: -3 } : null }));
+  }
+  log(`    ${factory.attendance} attendance sheets, ${factory.payrolls.length} payroll runs, ${factory.expenses.length} factory expenses`);
+  // the rules must refuse wrong entries
+  const henley = created.U1.find((x) => x.spec.key === 'U1-HENLEY').job.jobNo;
+  const anySheet = (await u1.get(`/m/hourlyProduction?status=Approved&job=${henley}&limit=1`)).rows[0];
+  const att = (await u1.get('/m/attendance?limit=1')).rows[0];
+  const pay = factory.payrolls.find((x) => x.businessUnit === 'U1');
+  const exp = factory.expenses.find((x) => x.businessUnit === 'U1' && x.referenceNo);
+  const sweat = created.U1.find((x) => x.spec.key === 'U1-SWEAT')?.job.jobNo;
+  let holdShipment = null;
+  if (sweat) holdShipment = (await u1.post('/m/shipment', { job: sweat, invoiceNo: `U1-EXP-HOLD-TEST`, mode: 'Sea', shipmentDate: day(9), qty: 3000, remarks: 'Planned – blocked until quality releases the goods (Sample / Test data)' }))._id;
+  factory.negative = await negativeTests(u1, {
+    jobNo: anySheet?.jobNo, sheet: anySheet, day, payroll: pay, expense: exp, attendance: att, heldJob: advance.U1.find((x) => x.spec.subJobs)?.job.jobNo,
+    labourExpense: pay ? { jobNo: created.U1.find((x) => x.spec.key === 'U1-HENLEY').job.jobNo, date: `${pay.period}-15` } : null, holdShipment,
+  });
+  factory.negative.forEach((t) => log(`    ${t.ok ? 'OK  ' : 'FAIL'} ${t.test}${t.ok ? '' : ` – ${t.got}`}`));
   // company-level finance lines for EBITDA (per unit, last 3 months)
   for (const [unit, api, scale] of [['U1', u1, 1], ['U2', u2, 0.8]]) {
     for (const m of [-60, -30, -2]) {
@@ -882,7 +984,7 @@ async function buildDataset() {
       }
     }
   }
-  return { created, subs1, subs2, advance, createdMasters: ids.createdMasters };
+  return { created, subs1, subs2, advance, createdMasters: ids.createdMasters, factory };
 }
 
 /** Flag everything this run created as Sample / Test data (masters it added too – they are never removed). */
@@ -1306,12 +1408,21 @@ async function main() {
   const server = await startApi();
   log('\nBuilding sample dataset through the API…');
   const startedAt = new Date(Date.now() - 1000);
-  const { created, createdMasters } = await buildDataset();
+  const { created, createdMasters, factory } = await buildDataset();
   await markSample(startedAt, createdMasters);
   log('\nChecking unit dashboards, reports, analytics and main job pages through the API…');
   const apiResult = await apiChecks();
   const wf = await workflowChecks();
   apiResult.issues.push(...wf.issues); Object.assign(apiResult.out, wf.out);
+  // factory operations: the guards refused every wrong entry, and every reconciliation holds in each unit and combined
+  factory.negative.filter((t) => !t.ok).forEach((t) => apiResult.issues.push(`Guard not enforced: ${t.test} (${t.got})`));
+  for (const unit of ['U1', 'U2', 'ALL']) {
+    const r = await U(unit === 'ALL' ? 'U1' : unit).get(`/factory/integrity${unit === 'ALL' ? '?unit=ALL' : ''}`);
+    r.checks.filter((c) => c.status !== 'PASS').forEach((c) => apiResult.issues.push(`${unit} integrity: ${c.title} – ${JSON.stringify(c.items.slice(0, 3))}`));
+    apiResult.out[`${unit} integrity checks`] = `${r.passed} passed, ${r.failed} failed`;
+  }
+  for (const key of ['production', 'wip', 'quality', 'fg', 'hr', 'expenses', 'copq', 'pnl']) await U('U1').get(`/factory/report/${key}?unit=ALL&from=${day(FACTORY_FROM)}`);
+  apiResult.out['Factory data'] = `${factory.attendance} attendance sheets, ${factory.payrolls.length} payroll runs, ${factory.expenses.length} factory expenses, ${factory.negative.filter((t) => t.ok).length}/${factory.negative.length} guard tests refused`;
   server.close();
 
   log('\nValidating…');

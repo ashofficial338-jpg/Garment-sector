@@ -10,15 +10,17 @@ import * as production from './production.js';
 import * as finance from './finance.js';
 import * as stock from './stock.js';
 import * as preproduction from './preproduction.js';
+import * as factory from './factory.js';
 
 const ordered = [
   commercial.enquiry, commercial.costing, commercial.quotation, commercial.buyerOrder, commercial.orders,
   preproduction.techSpec, preproduction.bom, preproduction.pattern, preproduction.marker,
   planning.tna, planning.ppMeeting, planning.fabricForecast, planning.fabricBooking, planning.fabricReceipt, planning.fabricAllocation, planning.fabricReturn, planning.fabricDebit, planning.fabricTransfer, planning.trimBooking,
   stock.yarnReceipt, stock.knitting, stock.fabricProcess, planning.sample, planning.productionPlan,
-  production.cutting, production.sewing, production.finishing, production.packing, production.inspection,
-  finance.shipment, finance.invoice, finance.payment, finance.expense, finance.supplierBill,
-  masters.buyer, masters.supplier, masters.master, masters.employee,
+  production.cutting, production.sewing, production.finishing, production.packing, factory.hourlyProduction, factory.productionRoute,
+  production.inspection, factory.qcRework, factory.qcCheckpoint,
+  finance.shipment, finance.invoice, finance.payment, finance.expense, finance.supplierBill, factory.factoryExpense,
+  masters.buyer, masters.supplier, masters.master, masters.employee, factory.attendance, factory.payroll,
 ];
 
 export const MODULES = Object.fromEntries(ordered.map((m) => [m.key, m]));
@@ -63,4 +65,4 @@ export function allowedTransitions(def, current) {
   return def.transitions?.[current] || [];
 }
 
-export { masters, commercial, planning, production, finance, stock, preproduction };
+export { masters, commercial, planning, production, finance, stock, preproduction, factory };

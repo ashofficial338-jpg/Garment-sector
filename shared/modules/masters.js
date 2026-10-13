@@ -1,5 +1,6 @@
 import { text, area, n, sel, bool, date, table, flow } from './dsl.js';
 import { CURRENCIES, DEPARTMENTS } from '../constants.js';
+import { LABOUR_SECTIONS } from './factory.js';
 
 const active = flow(['Active', 'Inactive'], { Inactive: ['Active'] });
 
@@ -43,6 +44,7 @@ export const MASTER_TYPES = [
   'Garment Type', 'Product Category', 'Style', 'Season', 'Buyer Group', 'Size', 'Color', 'Fabric', 'Fabric Composition', 'Trim', 'Accessory',
   'Operation', 'Machine', 'Process', 'Quality Parameter', 'Defect Type', 'Warehouse', 'Location', 'Cost Component', 'Currency', 'Tax Rate',
   'Unit', 'Payment Term', 'Shipment Term', 'Shipment Method', 'Expense Category', 'Costing Template', 'Country', 'Port', 'Department', 'Production Line', 'Floor', 'Wastage Rule',
+  'Shift', 'Hourly Slot', 'Delay Reason',
 ];
 
 export const master = {
@@ -72,9 +74,19 @@ export const employee = {
     n('presentDays', 'Present Days (month)'), n('workingDays', 'Working Days (month)'),
     { name: 'attendancePct', label: 'Attendance %', type: 'number', readOnly: true, list: true },
     bool('isOperator', 'Machine Operator'),
+    sel('section', 'Production Section (labour allocation)', LABOUR_SECTIONS, { list: true, filter: true, section: 'Wages & allocation' }),
+    sel('employmentType', 'Employment Type', ['Permanent', 'Contract', 'Trainee'], { default: 'Permanent', filter: true }),
+    text('contractor', 'Labour Contractor (contract labour)'),
+    sel('wageType', 'Wage Type', ['Monthly salary', 'Daily wage'], { default: 'Monthly salary' }),
+    n('monthlySalary', 'Monthly Salary'), n('dailyWage', 'Daily Wage'),
+    n('standardDays', 'Standard Working Days / Month', { default: 26 }), n('standardHours', 'Standard Hours / Day', { default: 8 }),
+    n('otRatePerHour', 'Overtime Rate / Hour'), n('employerContributionPct', 'Employer Contributions % (PF / ESI)', { max: 100 }),
+    { name: 'hourlyRate', label: 'Standard Cost / Hour (excl. employer %)', type: 'number', readOnly: true, list: true },
   ],
   compute(d) {
     const w = Number(d.workingDays) || 0;
-    return { attendancePct: w ? Math.round(((Number(d.presentDays) || 0) / w) * 1000) / 10 : 0 };
+    const days = Number(d.standardDays) || 26; const hrs = Number(d.standardHours) || 8;
+    const perDay = d.wageType === 'Daily wage' ? Number(d.dailyWage) || 0 : (Number(d.monthlySalary) || 0) / days;
+    return { attendancePct: w ? Math.round(((Number(d.presentDays) || 0) / w) * 1000) / 10 : 0, hourlyRate: Math.round((perDay / hrs) * 10000) / 10000 };
   },
 };

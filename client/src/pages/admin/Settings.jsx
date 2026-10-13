@@ -81,6 +81,17 @@ export default function Settings() {
           </div>
         </Card>
       )}
+      {tab === 'tolerance' && s.costing && (
+        <Card className="mt" title="Labour & overhead absorption (job costing)" icon="Factory" actions={<SaveBtn k="costing" />}>
+          <p className="muted small">Each month's labour and factory overhead is charged to jobs in proportion to sewing output against the unit's normal capacity. Output below capacity leaves the under-recovery as a period cost in the P&amp;L instead of loading it onto the few garments made.</p>
+          <div className="form-grid">
+            {Object.keys(s.costing.normalMonthlyOutput || {}).map((u) => (
+              <Field key={u} label={`${u} normal monthly output (garments)`} hint="0 = absorb the whole month's cost into that month's output"><input disabled={ro} type="number" min="0" value={s.costing.normalMonthlyOutput[u]} onChange={(e) => setObj('costing', 'normalMonthlyOutput', { ...s.costing.normalMonthlyOutput, [u]: Number(e.target.value) })} /></Field>
+            ))}
+            <Field label="Standard working days / month" hint="Capacity is prorated by the days the factory worked"><input disabled={ro} type="number" min="1" value={s.costing.standardWorkingDays} onChange={(e) => setObj('costing', 'standardWorkingDays', Number(e.target.value))} /></Field>
+          </div>
+        </Card>
+      )}
 
       {tab === 'notifications' && (
         <Card title="Notification rules" icon="BellRing" actions={<SaveBtn k="notifications" />}>

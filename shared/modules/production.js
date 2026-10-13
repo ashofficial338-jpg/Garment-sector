@@ -1,8 +1,17 @@
 import { text, area, n, calc, date, sel, ref, table, flow } from './dsl.js';
 import { parseRatio, efficiency, dhu, packingTotals, aqlEvaluate, aqlSampleSize, AQL_LEVELS, num, round, pct, sum } from '../calc.js';
+import { QC_STAGE_KEYS, INSPECTION_METHODS, PRODUCTION_DEPARTMENTS, DEFECT_CATEGORIES } from './factory.js';
 
 /** Standard garment defect list for defect entry (also kept as a Defect Type master list). */
-export const DEFECT_TYPES = ['Broken stitch', 'Skip stitch', 'Open seam', 'Uneven stitch', 'Puckering', 'Uneven hem', 'Stain / spot', 'Shade variation', 'Hole / fabric damage', 'Measurement out of tolerance', 'Wrong / missing label', 'Loose thread', 'Pressing / crease', 'Print / embroidery defect', 'Other'];
+export const DEFECT_TYPES = ['Broken stitch', 'Skip stitch', 'Open seam', 'Uneven stitch', 'Puckering', 'Uneven hem', 'Stain / spot', 'Shade variation', 'Hole / fabric damage', 'Measurement out of tolerance', 'Wrong / missing label', 'Loose thread', 'Pressing / crease', 'Print / embroidery defect', 'Damaged component', 'Ironing defect (shine / burn)', 'Packing error', 'Fabric fault (slub / yarn)', 'Other'];
+/** Default category of each standard defect (more Defect Type master values can be added freely). */
+export const DEFECT_CATEGORY_OF = {
+  'Broken stitch': 'Stitching', 'Skip stitch': 'Stitching', 'Open seam': 'Stitching', 'Uneven stitch': 'Stitching', Puckering: 'Stitching', 'Uneven hem': 'Stitching', 'Loose thread': 'Stitching',
+  'Stain / spot': 'Fabric', 'Shade variation': 'Fabric', 'Hole / fabric damage': 'Fabric', 'Fabric fault (slub / yarn)': 'Fabric',
+  'Measurement out of tolerance': 'Measurement', 'Damaged component': 'Component',
+  'Pressing / crease': 'Finishing / Ironing', 'Ironing defect (shine / burn)': 'Finishing / Ironing',
+  'Wrong / missing label': 'Packing & Labelling', 'Packing error': 'Packing & Labelling', 'Print / embroidery defect': 'Print / Embroidery',
+};
 
 const entryFlow = flow(['Submitted', 'Approved'], { Submitted: ['Rejected'], Rejected: ['Submitted'] });
 
@@ -134,26 +143,51 @@ export const packing = {
   },
 };
 
-/* ------------------------------ Final Inspection ------------------------------ */
+/* ------------------------------ Quality inspections ------------------------------ */
+/**
+ * Every QC inspection: stage, lot and disposition. The lot (pieces submitted) is split into
+ * passed + rework (repairable) + rejected (non-repairable) + held (decision pending) – these must add up to the lot.
+ * Reworked and held pieces only count as accepted after a Rework & Corrective Action record passes them on reinspection
+ * (or an authorised release).
+ */
 export const inspection = {
-  key: 'inspection', model: 'Inspection', title: 'Final Inspection', singular: 'Inspection', group: 'Quality', icon: 'ShieldCheck',
-  department: 'Quality', prefix: 'QC', jobLinked: true, stage: 'inspection',
+  key: 'inspection', model: 'Inspection', title: 'QC Inspections', singular: 'Inspection', group: 'Quality', icon: 'ShieldCheck',
+  department: 'Quality', prefix: 'QC', jobLinked: true, stage: 'inspection', editReasonStatuses: ['Passed', 'Final Approved', 'Failed'],
   ...flow(['Pending', 'Inspection', 'Passed', 'Final Approved'], { Inspection: ['Failed'], Failed: ['Re-inspection'], 'Re-inspection': ['Passed', 'Failed'] }),
   defaultStatus: 'Pending',
   fields: [
-    date('inspectionDate', 'Inspection Date', { required: true, list: true }),
-    sel('inspectionType', 'Type', ['Inline', 'End-line', 'Mid-line', 'Pre-final', 'Final', 'Re-inspection'], { default: 'Final', list: true }),
-    text('inspector', 'Inspector', { list: true }), text('inspectionAgency', 'Agency / Buyer QA'),
-    n('lotSize', 'Lot Size (pcs)', { required: true }),
+    date('inspectionDate', 'Inspection Date', { required: true, list: true, section: 'Inspection' }),
+    text('inspectionTime', 'Time'),
+    sel('inspectionStage', 'Inspection Stage', QC_STAGE_KEYS, { list: true, filter: true, hint: 'Checkpoints configured for this stage, buyer and style are loaded automatically' }),
+    sel('inspectionType', 'Type', ['Inline', 'End-line', 'Mid-line', 'Pre-final', 'Final', 'Re-inspection', 'Stage'], { default: 'Final', list: true }),
+    sel('inspectionMethod', 'Inspection Method', INSPECTION_METHODS),
+    sel('department', 'Inspected at Department', PRODUCTION_DEPARTMENTS, { filter: true }),
+    text('line', 'Line / Table', { filter: true }),
+    text('color', 'Colour'), text('size', 'Size'), text('bundleNo', 'Batch / Bundle No'),
+    text('inspector', 'Inspector', { list: true, filter: true }), text('inspectionAgency', 'Agency / Buyer QA'),
+    n('lotSize', 'Lot Qty Submitted (pcs)', { required: true, list: true }),
     sel('majorAql', 'Major AQL', AQL_LEVELS, { default: '2.5' }), sel('minorAql', 'Minor AQL', AQL_LEVELS, { default: '4.0' }),
-    n('inspectionQty', 'Inspection Qty (blank = AQL sample)'),
+    n('inspectionQty', 'Sample / Qty Inspected (blank = AQL sample)'),
     calc('sampleSize', 'AQL Sample Size'),
-    table('defectLines', 'Defect Entry (by defect type)', [sel('defectType', 'Defect Type', DEFECT_TYPES), sel('severity', 'Severity', ['Critical', 'Major', 'Minor'], { default: 'Minor' }), text('location', 'Operation / Location'), n('count', 'Count')], { section: 'Defects', hint: 'When defects are entered here, the critical / major / minor totals are calculated from them' }),
+    table('checklist', 'Checkpoints', [text('parameter', 'Checkpoint'), text('specification', 'Specification'), text('tolerance', 'Tolerance'), sel('result', 'Result', ['Pass', 'Fail', 'N/A']), text('remark', 'Remark')], { section: 'Checkpoints' }),
+    table('defectLines', 'Defect Entry', [
+      text('defectType', 'Defect', { suggest: 'Defect Type' }), sel('defectCategory', 'Category', DEFECT_CATEGORIES), text('defectCode', 'Code'),
+      sel('severity', 'Severity', ['Critical', 'Major', 'Minor'], { default: 'Minor' }), text('location', 'Operation / Location'),
+      sel('responsibleDept', 'Responsible Dept', PRODUCTION_DEPARTMENTS), text('responsibleLine', 'Line / Team'), n('count', 'Count'),
+    ], { section: 'Defects', hint: 'When defects are entered here, the critical / major / minor totals are calculated from them' }),
     n('criticalDefects', 'Critical Defects'), n('majorDefects', 'Major Defects'), n('minorDefects', 'Minor Defects'),
     calc('majorAccept', 'Major Ac'), calc('minorAccept', 'Minor Ac'),
     calc('totalDefects', 'Total Defects', { list: true }), calc('defectRate', 'Defect %'),
-    n('passQty', 'Pass Qty'), n('failQty', 'Fail Qty'), n('reworkQty', 'Rework Qty'), n('rejectQty', 'Reject Qty'),
     calc('aqlResult', 'AQL Result', { type: 'text', list: true }),
+    n('passQty', 'Passed', { section: 'Lot disposition', hint: 'Passed + rework + rejected + held = lot. Left blank, a passed lot is fully passed and a failed lot fully held.' }),
+    n('reworkQty', 'Rework (repairable)'), n('rejectQty', 'Rejected (non-repairable)'), n('heldQty', 'Held (decision pending)'),
+    calc('failQty', 'Failed (rework + rejected)', { list: true }),
+    calc('unaccountedQty', 'Not dispositioned'),
+    calc('firstPassYieldPct', 'First Pass Yield %', { list: true }),
+    sel('responsibleDept', 'Responsible Production Department', PRODUCTION_DEPARTMENTS, { section: 'Follow-up' }),
+    area('correctiveAction', 'Corrective Action'),
+    text('documentRef', 'Photo / Document Reference'),
+    date('reinspectionDue', 'Reinspection Due'),
     area('remarks', 'Remarks'),
   ],
   prefill: (job) => ({ lotSize: job.orderQty, sampleSize: aqlSampleSize(job.orderQty) }),
@@ -161,6 +195,13 @@ export const inspection = {
     const lines = (d.defectLines || []).filter((l) => num(l.count) > 0);
     const sev = (s) => sum(lines.filter((l) => l.severity === s), 'count');
     const totals = lines.length ? { criticalDefects: sev('Critical'), majorDefects: sev('Major'), minorDefects: sev('Minor') } : {};
-    return { ...totals, ...aqlEvaluate({ ...d, ...totals }) };
+    const disp = ['passQty', 'reworkQty', 'rejectQty', 'heldQty'];
+    const given = disp.some((k) => d[k] !== null && d[k] !== undefined && d[k] !== '');
+    return {
+      ...totals, ...aqlEvaluate({ ...d, ...totals }),
+      failQty: num(d.reworkQty) + num(d.rejectQty),
+      unaccountedQty: given ? num(d.lotSize) - disp.reduce((t, k) => t + num(d[k]), 0) : null,
+      firstPassYieldPct: given && num(d.lotSize) ? pct(d.passQty, d.lotSize) : null,
+    };
   },
 };

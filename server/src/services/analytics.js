@@ -16,6 +16,7 @@
 import { models } from '../modules/builder.js';
 import { StockMovement } from '../models/StockMovement.js';
 import { loadJobGraphs, computeProfit } from './lifecycle.js';
+import { allocations, unitsInScope } from './costAllocation.js';
 import { getSetting } from './settings.js';
 import { COST_HEADS, FINANCE_LINES, INVENTORY_CATEGORIES, headOfExpense, financeLineOf } from '../../../shared/costHeads.js';
 import { num, round, sum, pct } from '../../../shared/calc.js';
@@ -82,6 +83,13 @@ export function finance(ctx) {
       if (fin) lines[fin.key].push(row);
       else if (head?.cogs && e.job) lines.absorbed.push({ ...row, note: 'In job cost of goods (COGS when invoiced)' });
       else lines.opex.push({ ...row, note: head?.cogs ? 'Production cost not linked to a job' : `${head?.label || 'Other'} – operating expense` });
+    });
+    // factory labour / overhead with no output to absorb it, and factory depreciation – period costs (costAllocation.js)
+    const units = unitsInScope();
+    (await allocations(units)).dated.filter((d) => units.includes(d.unit) && inPeriod(d.date, period)).forEach((d) => {
+      const row = { _id: `${d.unit}-${d.date}-${d.section}-${d.kind}`, refNo: d.section, date: d.date, category: d.kind, description: d.kind, amount: r2(d.amount), jobNo: '', businessUnit: d.unit };
+      if (d.kind === 'Depreciation') lines.depreciation.push({ ...row, category: 'Depreciation', description: 'Factory depreciation' });
+      else lines.opex.push({ ...row, note: 'Factory cost not absorbed by production in its month' });
     });
     const revenue = r2(sum(sales, 'revenue'));
     const cogs = r2(sum(sales, 'cogs'));

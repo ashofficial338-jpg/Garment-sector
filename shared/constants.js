@@ -93,4 +93,7 @@ export const SYSTEM_PERMISSION_MODULES = [
   { key: 'profit', title: 'Profit Analysis' },
   { key: 'stock', title: 'Stock Reports' },
   { key: 'analytics', title: 'Management Analytics (ROI, ITR, EBITDA, drill-down)' },
+  { key: 'factoryReports', title: 'Production, Quality & HR Dashboards / Integrity Checks' },
+  { key: 'pnl', title: 'Profit & Loss, Job Costing, Cost of Quality & Cash Flow' },
+  { key: 'qualityRelease', title: 'Quality Release (release held goods / override quality gates)' },
 ];

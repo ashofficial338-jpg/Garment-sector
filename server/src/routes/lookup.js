@@ -26,6 +26,8 @@ const SOURCES = {
   FabricReturn: { model: 'fabricReturn', fields: 'refNo jobNo returnType qty unit rate status', search: ['refNo', 'jobNo'], label: (x) => `${x.refNo} · ${x.jobNo} · ${x.qty} ${x.unit || ''} · ${x.returnType}` },
   BuyerOrder: { model: 'buyerOrder', fields: 'refNo poNo styleNo buyerName orderQty orderType deliveryDate status jobNo', search: ['refNo', 'poNo', 'styleNo', 'buyerName'], label: (x) => `${x.poNo} · ${x.styleNo} · ${x.orderQty} pcs · ${x.buyerName || ''} (${x.refNo})` },
   Shipment: { model: 'shipment', fields: 'refNo invoiceNo jobNo qty status', search: ['refNo', 'invoiceNo', 'jobNo'], label: (x) => `${x.refNo} · ${x.jobNo} · ${x.qty} pcs` },
+  Inspection: { model: 'inspection', fields: 'refNo jobNo inspectionStage inspectionType lotSize status reworkQty heldQty', search: ['refNo', 'jobNo', 'inspectionStage'], label: (x) => `${x.refNo} · ${x.inspectionStage || x.inspectionType || ''} · lot ${x.lotSize ?? 0} · ${x.status}` },
+  Employee: { model: 'employee', fields: 'empCode name section designation', search: ['empCode', 'name'], label: (x) => `${x.empCode} · ${x.name}${x.section ? ` (${x.section})` : ''}` },
 };
 
 r.get('/master/:type', asyncHandler(async (req, res) => {

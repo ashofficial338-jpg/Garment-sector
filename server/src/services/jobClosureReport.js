@@ -7,11 +7,15 @@
  * Cost recognition (ties to job profit exactly):
  *   fabric  = value received into the job's fabric bookings (roll receipts, transfers in, typed receipts)
  *             ± accepted fabric debit notes (supplier recovery − / additional charge +)
- *   trims   = received trim value · job expenses = their amount
+ *   trims   = received trim value · job expenses and job-linked factory expenses = their amount
+ *   labour, inspection labour and factory overhead = the job's share of payroll / attendance and factory expenses
+ *             (costAllocation.js), booked as allocation lines
  *   a cost bucket with no actual cost at all is charged at its costed standard × produced qty (shown as such)
  */
 import { models } from '../modules/builder.js';
 import { loadJobGraph, computeProfit, computeStages } from './lifecycle.js';
+import { jobAllocation } from './costAllocation.js';
+import { QUALITY_EXPENSE_CATEGORIES } from '../../../shared/modules/factory.js';
 import { transfersInto } from './fabricRolls.js';
 import { getSetting } from './settings.js';
 import { financeLineOf } from '../../../shared/costHeads.js';
@@ -32,8 +36,8 @@ export const CLOSURE_REGISTER_COLUMNS = [
 /** Display order of transaction types on the same day (process order). */
 const SEQ = ['Buyer Enquiry', 'Costing', 'Quotation', 'Buyer PO', 'Job Opened', 'Sub Job Opened', 'Order Revision', 'Specification', 'BOM', 'CAD / Pattern', 'Marker',
   'Fabric Purchase', 'Fabric Forecast Purchase', 'Fabric Inward', 'Fabric Transfer In', 'Fabric Transfer Out', 'Fabric Reservation', 'Fabric Issue', 'Fabric Return', 'Fabric Debit Note', 'Fabric Consumed', 'Fabric Job Closed',
-  'Fabric Stock Adjustment', 'Trim Purchase', 'Trim Inward', 'Cutting', 'Sewing', 'Finishing', 'Quality Inspection', 'Packing → Finished Goods', 'Shipment → Finished Goods Out', 'Invoice', 'Payment', 'Supplier Bill', 'Supplier Payment', 'Expense',
-  'Standard Cost Applied', 'Document', 'Job Closed'];
+  'Fabric Stock Adjustment', 'Trim Purchase', 'Trim Inward', 'Cutting', 'Hourly Production', 'Sewing', 'Finishing', 'Quality Inspection', 'Quality Issue / Rework', 'Packing → Finished Goods', 'Shipment → Finished Goods Out', 'Invoice', 'Payment', 'Supplier Bill', 'Supplier Payment', 'Expense',
+  'Factory Expense (job)', 'Labour Allocated', 'Inspection Labour Allocated', 'Factory Overhead Allocated', 'Standard Cost Applied', 'Document', 'Job Closed'];
 
 export async function buildJobClosureReport(jobDoc, { withMoney = true } = {}) {
   const main = jobDoc.parentJob ? await models.orders.findById(jobDoc.parentJob).lean() : jobDoc;
@@ -124,7 +128,9 @@ export async function buildJobClosureReport(jobDoc, { withMoney = true } = {}) {
   g.cutting.forEach((c) => add(c, { date: c.entryDate, department: 'Cutting', txType: 'Cutting', module: 'cutting', description: `Lay ${c.layNo || '—'} · ${c.plies || 0} plies · marker ${c.markerNo || '—'} · fabric used ${r3(c.fabricUsed)}${num(c.rejectQty) ? ` · reject ${c.rejectQty}` : ''}`, qty: c.cutQty, unit: 'pcs' }));
   g.sewing.forEach((s) => add(s, { date: s.entryDate, department: 'Sewing', txType: 'Sewing', module: 'sewing', description: `${s.line} · eff ${s.efficiencyPct}% · DHU ${s.dhu ?? '—'} · rejection ${s.rejection || 0}`, qty: s.actualQty, unit: 'pcs' }));
   g.finishing.forEach((f) => add(f, { date: f.entryDate, department: 'Finishing', txType: 'Finishing', module: 'finishing', description: `${f.process && f.process !== 'All' ? `${f.process} · ` : ''}Input ${f.inputQty} · passed ${f.passedQty} · alteration ${f.alteration || 0} · rework ${f.rework || 0} · rejection ${f.rejection || 0}${num(f.ironedQty) ? ` · ironed ${f.ironedQty}` : ''}${num(f.needleCheckedQty) ? ` · needle-checked ${f.needleCheckedQty}, metal found ${f.needleFailQty || 0}` : ''}`, qty: f.passedQty, unit: 'pcs' }));
-  g.inspections.forEach((i) => add(i, { date: i.inspectionDate, department: 'Quality', txType: 'Quality Inspection', module: 'inspection', description: `${i.inspectionType} · lot ${i.lotSize} · ${i.inspectionAgency || ''} · defects ${i.totalDefects ?? '—'} · AQL ${i.aqlResult || '—'}`, qty: i.lotSize, unit: 'pcs' }));
+  (g.hourly || []).forEach((h) => add(h, { date: h.entryDate, department: h.department, txType: 'Hourly Production', module: 'hourlyProduction', description: `${h.department}${h.line ? ` · ${h.line}` : ''} · ${h.shift} · ${(h.slots || []).length} hours · input ${h.inputQty} · completed ${h.completedQty} · rejected ${h.rejectedQty} · rework ${h.reworkQty}${num(h.downtimeMin) ? ` · downtime ${h.downtimeMin} min` : ''}`, qty: h.completedQty, unit: 'pcs' }));
+  g.inspections.forEach((i) => add(i, { date: i.inspectionDate, department: 'Quality', txType: 'Quality Inspection', module: 'inspection', description: `${i.inspectionStage || i.inspectionType} · lot ${i.lotSize} · ${i.inspectionAgency || ''} · defects ${i.totalDefects ?? '—'} · AQL ${i.aqlResult || '—'}${i.passQty !== undefined && i.passQty !== null ? ` · passed ${i.passQty}, rework ${i.reworkQty || 0}, rejected ${i.rejectQty || 0}, held ${i.heldQty || 0}` : ''}`, qty: i.lotSize, unit: 'pcs' }));
+  (g.reworks || []).forEach((r) => add(r, { date: r.issueDate, department: r.assignedDept || 'Quality', txType: 'Quality Issue / Rework', module: 'qcRework', description: `${r.inspectionStage} · ${r.defectType || ''} · failed ${r.failedQty} · reworked ${r.reworkedQty || 0} · passed on reinspection ${r.reinspPassedQty || 0} · rejected ${num(r.reinspRejectedQty) + num(r.scrapQty)} · released ${r.releasedQty || 0} · pending ${r.pendingQty || 0}${r.correctiveAction ? ` · CA: ${r.correctiveAction}` : ''}`, qty: r.failedQty, unit: 'pcs' }));
   g.packing.forEach((p) => add(p, { date: p.packingDate, department: 'Packing', txType: 'Packing → Finished Goods', module: 'packing', description: `${p.totalCartons} cartons · ${r3(p.totalCbm)} CBM`, qty: p.totalQty, unit: 'pcs' }));
   g.shipments.forEach((s) => {
     const j = jobOf.get(String(s.job));
@@ -140,6 +146,7 @@ export async function buildJobClosureReport(jobDoc, { withMoney = true } = {}) {
     add(b, { refNo: b.billNo, date: b.billDate, department: 'Accounts', txType: 'Supplier Bill', module: 'supplierBill', description: `${b.billType} · ${b.supplierName || ''} · PO ${b.poRef || '—'} · tax ${r2(b.taxAmount)}${num(b.debitNoteAdjusted) ? ` · debit notes set off ${r2(b.debitNoteAdjusted)} (${b.debitNoteRefs || ''})` : ''} · outstanding ${r2(b.outstanding)}`, qty: b.qty, unit: b.unit, rate: b.rate, amount: b.totalAmount, status: `${b.status} · ${b.paymentStatus}` });
     (b.payments || []).forEach((p, i) => add(b, { refNo: p.reference || `${b.billNo}/P${i + 1}`, date: p.date, department: 'Accounts', txType: 'Supplier Payment', module: 'supplierBill', description: `${p.mode || ''} to ${b.supplierName || 'supplier'} against ${b.billNo}`, amount: p.amount, status: 'Paid' }));
   });
+  (g.factoryExpenses || []).forEach((e) => add(e, { date: e.expenseDate, department: QUALITY_EXPENSE_CATEGORIES.includes(e.category) ? 'Quality' : 'Accounts', txType: 'Factory Expense (job)', module: 'factoryExpense', description: `${e.category} · ${e.payee} bill ${e.referenceNo || '—'} · ${e.description || ''}`, amount: e.amount, costImpact: e.amount }));
   g.docs.forEach((d) => add(d, { date: d.createdAt, department: 'Shipment / Documentation', txType: 'Document', module: 'documents', description: `${d.docType} · ${d.title || ''} (v${d.currentVersion || 1})`, status: 'Uploaded' }));
 
   // ---------- per job: standard costs, reconciliation ----------
@@ -194,6 +201,19 @@ async function reconcile(g, rows, add, withMoney, isMain = false) {
     jobNo: j.jobNo, refNo: `STD-${h.key}`, date: j.closedAt || g.shipments.map((s) => s.actualShipDate || s.shipmentDate).filter(Boolean).sort((a, b) => new Date(a) - new Date(b)).pop() || g.packing.map((x) => x.packingDate).filter(Boolean).sort((a, b) => new Date(a) - new Date(b)).pop(),
     department: 'Accounts', txType: 'Standard Cost Applied', module: 'profit', status: 'Standard', description: `${h.label}: no actual cost booked – costed ${h.estimatedPerPc}/pc × ${p.producedQty} pcs`, amount: h.actual, costImpact: h.actual,
   }));
+  // payroll / attendance labour and factory overhead allocated to the job – booked so the ledger ties to the profit
+  if (!isMain) {
+    const al = jobAllocation(g.alloc, j._id);
+    const lastProd = [...(g.hourly || []).map((h) => h.entryDate), ...g.sewing.map((x) => x.entryDate)].filter(Boolean).sort((a, b) => new Date(a) - new Date(b)).pop() || j.closedAt;
+    const lines = [
+      ['Labour Allocated', 'ALLOC-LABOUR', al.labourActual + al.labourEstimated, al.labourEstimated, `Production labour from payroll / attendance by department: ${Object.entries(al.byDept).filter(([k]) => !['Checking', 'Quality Control', 'Quality Inspection'].includes(k)).map(([k, v]) => `${k} ${r2(v)}`).join(' · ')}`],
+      ['Inspection Labour Allocated', 'ALLOC-QC', al.qualityLabourActual + al.qualityLabourEstimated, al.qualityLabourEstimated, 'Checking, end-line QC and inspection sections'],
+      ['Factory Overhead Allocated', 'ALLOC-OH', al.overheadActual + al.overheadEstimated, al.overheadEstimated, 'Factory expenses and indirect labour, by sewing output share (normal-capacity absorption)'],
+    ];
+    lines.filter(([, , amt]) => num(amt) > 0.004).forEach(([txType, refNo, amt, est, description]) => add(null, {
+      jobNo: j.jobNo, refNo, date: lastProd, department: 'Accounts', txType, module: 'factory', status: num(est) > 0.004 ? `Includes ${r2(est)} estimated` : 'Actual', description, amount: r2(amt), costImpact: amt,
+    }));
+  }
   const R = rows.filter(mine);
   const fab = (t) => R.filter((r) => r.txType === t);
   const received = r3(sum(fab('Fabric Inward').filter((r) => r.module !== 'fabricReceipt' || g.receipts.some((x) => String(x._id) === String(r.recordId) && x.booking)), 'qty') + sum(fab('Fabric Transfer In'), 'qty'));

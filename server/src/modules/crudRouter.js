@@ -26,6 +26,7 @@ import { audit, describeChanges } from '../services/audit.js';
 import { nextRefNo } from '../services/numbering.js';
 import { refreshJobSoon } from '../services/lifecycle.js';
 import { sendExport, moduleColumns } from '../services/exporter.js';
+import { noteChange } from '../services/costAllocation.js';
 
 const APPROVAL_STATUSES = ['Approved', 'Final Approved', 'Pattern Approved', 'Rejected', 'Verified', 'Reconciled', 'Passed', 'Failed'];
 const LOCKED_STATUSES = ['Closed', 'Fabric Job Closed', 'Cancelled', 'Converted'];
@@ -161,6 +162,7 @@ export function crudRouter(def) {
     if (ctx.overrideUsed) await audit(req, { action: 'OVERRIDE', module: def.key, record: doc, reason, message: ctx.overrideUsed.join('; ') });
     ctx.saved = doc.toObject();
     if (H.afterSave) await H.afterSave(ctx);
+    noteChange(def.key);
     if (job) refreshJobSoon(job._id);
     res.status(201).json(doc);
   }));
@@ -172,6 +174,11 @@ export function crudRouter(def) {
     if (!doc || doc.isDeleted) throw ApiError.notFound();
     const reason = overrideAllowed(req, def);
     if (LOCKED_STATUSES.includes(doc.status) && !reason) throw ApiError.badRequest(`${def.singular} is ${doc.status} and locked. Override with reason required.`);
+    // changing an approved / final record is an authorised change: the reason is recorded with the old → new values
+    const editReason = String(req.body?._reason || '').trim().slice(0, 500) || reason || '';
+    if ((def.editReasonStatuses || []).includes(doc.status) && !editReason) {
+      throw ApiError.badRequest(`${def.singular} ${doc.refNo} is ${doc.status} – give a reason for the change`, { code: 'REASON_REQUIRED' });
+    }
     const before = doc.toObject();
     const job = await resolveJob(def, { job: before.job });
     let data = { ...before, ...sanitize(def, req.body) };
@@ -193,11 +200,12 @@ export function crudRouter(def) {
     await doc.save();
     const changes = diffObjects(before, doc.toObject());
     if (changes.length) {
-      await audit(req, { action: 'UPDATE', module: def.key, record: doc, changes, message: describeChanges(req.user.name, def, changes) });
+      await audit(req, { action: 'UPDATE', module: def.key, record: doc, changes, reason: editReason || undefined, message: describeChanges(req.user.name, def, changes) });
     }
     if (ctx.overrideUsed) await audit(req, { action: 'OVERRIDE', module: def.key, record: doc, reason, message: ctx.overrideUsed.join('; ') });
     ctx.saved = doc.toObject();
     if (H.afterSave) await H.afterSave(ctx);
+    noteChange(def.key);
     if (job) refreshJobSoon(job._id);
     res.json(doc);
   }));
@@ -256,6 +264,7 @@ export function crudRouter(def) {
     const ctx = { def, data: doc.toObject(), existing: { status: from }, req, saved: doc.toObject(), statusExplicit: true };
     if (def.jobLinked && doc.job) ctx.job = await models.orders.findById(doc.job).lean();
     if (H.afterSave && (ctx.job || !def.jobLinked)) await H.afterSave(ctx);
+    noteChange(def.key);
     if (doc.job) refreshJobSoon(doc.job);
     res.json(doc);
   }));
@@ -271,6 +280,7 @@ export function crudRouter(def) {
     await doc.save();
     await audit(req, { action: 'DELETE', module: def.key, record: doc, reason: doc.deleteReason, message: `${req.user.name} deleted ${def.singular} ${doc.refNo}` });
     if (H.afterDelete) await H.afterDelete(doc.toObject());
+    noteChange(def.key);
     if (doc.job) refreshJobSoon(doc.job);
     res.json({ ok: true });
   }));
@@ -283,6 +293,7 @@ export function crudRouter(def) {
     await doc.save();
     await audit(req, { action: 'RESTORE', module: def.key, record: doc, message: `${req.user.name} restored ${def.singular} ${doc.refNo}` });
     if (H.afterDelete) await H.afterDelete(doc.toObject());
+    noteChange(def.key);
     if (doc.job) refreshJobSoon(doc.job);
     res.json(doc);
   }));

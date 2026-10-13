@@ -78,6 +78,23 @@ function TagsInput({ value = [], onChange, disabled }) {
   );
 }
 
+/* --------------------------- Free text with master-data suggestions (e.g. Defect Type) --------------------------- */
+const suggestCache = new Map();
+function SuggestInput({ type, value, onChange, disabled }) {
+  const [opts, setOpts] = useState(suggestCache.get(type) || []);
+  const id = `sg-${type.replace(/\W+/g, '-')}`;
+  useEffect(() => {
+    if (suggestCache.has(type)) return;
+    api.get(`/lookup/master/${encodeURIComponent(type)}`).then((r) => { const v = r.data.map((x) => x.name); suggestCache.set(type, v); setOpts(v); }).catch(() => {});
+  }, [type]);
+  return (
+    <>
+      <input list={id} value={value ?? ''} disabled={disabled} onChange={(e) => onChange(e.target.value)} />
+      <datalist id={id}>{opts.map((o) => <option key={o} value={o} />)}</datalist>
+    </>
+  );
+}
+
 /* --------------------------- Single input --------------------------- */
 export function FieldInput({ f, value, onChange, disabled, params }) {
   if (f.readOnly) {
@@ -97,7 +114,7 @@ export function FieldInput({ f, value, onChange, disabled, params }) {
     case 'boolean': return <label className="check"><input type="checkbox" checked={!!value} disabled={disabled} onChange={(e) => onChange(e.target.checked)} /> {f.label}</label>;
     case 'ref': return <RefSelect refModel={f.ref} value={value} onChange={onChange} disabled={disabled} params={params} />;
     case 'tags': return <TagsInput value={value || []} onChange={onChange} disabled={disabled} />;
-    default: return <input value={value ?? ''} disabled={disabled} onChange={(e) => onChange(e.target.value)} />;
+    default: return f.suggest ? <SuggestInput type={f.suggest} value={value} disabled={disabled} onChange={onChange} /> : <input value={value ?? ''} disabled={disabled} onChange={(e) => onChange(e.target.value)} />;
   }
 }
 

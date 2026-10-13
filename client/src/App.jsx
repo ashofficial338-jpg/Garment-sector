@@ -26,6 +26,7 @@ const Analytics = lazy(() => import('./pages/Analytics.jsx'));
 const StockReports = lazy(() => import('./pages/StockReports.jsx'));
 const OrderTracking = lazy(() => import('./pages/OrderTracking.jsx'));
 const JobClosureReport = lazy(() => import('./pages/JobClosureReport.jsx'));
+const FactoryCenter = lazy(() => import('./pages/FactoryCenter.jsx'));
 
 export default function App() {
   const { user, ready } = useAuth();
@@ -52,6 +53,8 @@ export default function App() {
           <Route path="profit" element={<Profit />} />
           <Route path="analytics" element={<Analytics />} />
           <Route path="stock" element={<StockReports />} />
+          <Route path="factory" element={<FactoryCenter />} />
+          <Route path="factory/:tab" element={<FactoryCenter />} />
           <Route path="notifications" element={<Notifications />} />
           <Route path="framework" element={<Framework />} />
           <Route path="admin/users" element={<Users />} />

@@ -101,7 +101,10 @@ function jobRow(g, { target, workflow, unitName, withProfit, jobsByNo }) {
     hold = [`On hold – ${why}`, dept];
   } else {
     const lastInsp = [...g.inspections].sort((a, b) => new Date(a.inspectionDate) - new Date(b.inspectionDate)).pop();
-    if (lastInsp?.status === 'Failed') hold = [`Quality – ${lastInsp.inspectionType} inspection failed (${lastInsp.refNo}), re-inspection pending`, 'Quality'];
+    // pieces held by quality: open quality issues with a pending quantity (rework / reinspection not finished)
+    const heldIssues = (g.reworks || []).filter((r) => r.status !== 'Closed' && num(r.pendingQty) > 0);
+    if (heldIssues.length) hold = [`Quality – ${sum(heldIssues, 'pendingQty')} pcs on hold (${heldIssues.map((r) => `${r.refNo} ${r.inspectionStage}`).join(', ')}), rework / reinspection pending`, 'Quality'];
+    else if (lastInsp?.status === 'Failed') hold = [`Quality – ${lastInsp.inspectionStage || lastInsp.inspectionType} inspection failed (${lastInsp.refNo}), re-inspection pending`, 'Quality'];
     else if (st.trims === 'delayed') hold = ['Trims shortage – booked trims overdue', 'Factory Merchandising'];
     else if (st.fabric === 'delayed') hold = ['Fabric shortage – booked fabric overdue', 'Fabric Department'];
     else if ([st.approval, st.sampling].includes('delayed')) hold = ['Approval pending – sample rejected / resubmission due', 'Head Office Merchandising'];
