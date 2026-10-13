@@ -21,6 +21,8 @@ const DAY = 86400000;
 const r2 = (v) => round(v, 2);
 const isoDay = (d) => (d ? new Date(d).toISOString().slice(0, 10) : '');
 const monthOf = (d) => isoDay(d).slice(0, 7);
+/** Monday of the ISO week the date falls in. */
+const weekOf = (d) => { const x = new Date(`${isoDay(d)}T00:00:00Z`); return isoDay(new Date(x.getTime() - ((x.getUTCDay() + 6) % 7) * DAY)); };
 const c = (key, label, o = {}) => ({ key, label, ...o });
 const N = (key, label, d = 0) => c(key, label, { num: d });
 const link = (module, id) => ({ module, id: String(id) });
@@ -89,7 +91,7 @@ export async function productionReport(q) {
   if (ids) f.job = { $in: [...ids] };
   const sheets = await models.hourlyProduction.find(f).sort({ entryDate: 1, department: 1, line: 1 }).lean();
   const hourly = sheets.flatMap((s) => (s.slots || []).map((r) => ({
-    ...jobCols(jobs.get(String(s.job)) || s, names), date: isoDay(s.entryDate), month: monthOf(s.entryDate), shift: s.shift, department: s.department, line: s.line || '', operation: s.operation || '',
+    ...jobCols(jobs.get(String(s.job)) || s, names), date: isoDay(s.entryDate), week: weekOf(s.entryDate), month: monthOf(s.entryDate), shift: s.shift, department: s.department, line: s.line || '', operation: s.operation || '',
     slot: r.slot, color: r.color || s.color || '', size: r.size || s.size || '', target: num(r.target), input: num(r.inputQty), completed: num(r.completedQty), rejected: num(r.rejectedQty), rework: num(r.reworkQty),
     achievementPct: num(r.target) ? pct(r.completedQty, r.target, 1) : null, downtimeMin: num(r.downtimeMin), delayReason: r.delayReason || '', team: r.team || '', manHours: num(r.workingHours),
     sheet: s.refNo, status: s.status, enteredBy: r.enteredBy || s.createdByName, enteredAt: r.enteredAt || '', _ref: s.refNo, _link: link('hourlyProduction', s._id),
@@ -102,6 +104,7 @@ export async function productionReport(q) {
   const jobwise = group(hourly, ['unit', 'mainJob', 'jobNo', 'buyerName', 'styleNo', 'department'], S, achieved);
   const teamwise = group(hourly.filter((h) => h.team), ['unit', 'department', 'line', 'team'], S, achieved);
   const slotwise = group(hourly, ['department', 'slot'], ['target', 'completed']).map((g) => ({ ...g, achievementPct: g.target ? pct(g.completed, g.target, 1) : null }));
+  const weekly = group(hourly, ['week', 'unit', 'department'], S, achieved);
   const monthly = group(hourly, ['month', 'unit', 'department'], S, achieved);
   const delays = hourly.filter((h) => h.downtimeMin > 0 || h.delayReason);
   // each sheet's stored daily totals must equal the sum of its hourly rows
@@ -125,6 +128,7 @@ export async function productionReport(q) {
       job: T('Job-wise production (Main Job / Sub Job)', [c('unit', 'Unit'), c('mainJob', 'Main Job'), c('jobNo', 'Job / Sub Job'), c('buyerName', 'Buyer'), c('styleNo', 'Style'), c('department', 'Department'), ...G], jobwise),
       target: T('Hourly target vs actual', [c('department', 'Department'), c('slot', 'Hour'), N('target', 'Target'), N('completed', 'Actual'), N('achievementPct', 'Achv %', 1)], slotwise),
       team: T('Employee / team-wise performance', [c('unit', 'Unit'), c('department', 'Department'), c('line', 'Line'), c('team', 'Team'), ...G], teamwise),
+      weekly: T('Weekly production (week starting Monday)', [c('week', 'Week of'), c('unit', 'Unit'), c('department', 'Department'), ...G], weekly),
       monthly: T('Unit-wise monthly comparison', [c('month', 'Month'), c('unit', 'Unit'), c('department', 'Department'), ...G], monthly),
       delays: T('Downtime & delay reasons', HC, delays),
       consistency: T('Hourly ↔ daily consistency (sheets whose totals differ from their hourly rows)', [c('sheet', 'Sheet', { link: true }), c('date', 'Date'), c('department', 'Department'), c('jobNo', 'Job'), c('fields', 'Fields that differ')], mismatches),
@@ -199,10 +203,30 @@ export async function finishedGoodsReport(q) {
       _link: link('orders', j._id),
     };
   });
+  // where finished output is waiting: final QC → packing → shipment (jobs on department flow), and overdue balances
+  const pipeline = graphs.map((g) => {
+    const j = g.job; const f = flows.get(String(j._id));
+    if (!f.onFlow) return null;
+    const dep = (n) => f.departments.find((d) => d.department === n);
+    const fin = f.stages.find((x) => x.stage === 'Final Garment Inspection');
+    const ironed = dep('Ironing and Finishing')?.completed || 0;
+    const due = j.deliveryDate || j.shipmentDate;
+    const balance = Math.max(num(j.orderQty) - f.fg.shipped, 0);
+    return {
+      ...jobCols(j, names), orderQty: num(j.orderQty), ironed,
+      awaitingFinalQc: Math.max(ironed - num(fin?.lots), 0) + num(fin?.awaiting), onQualityHold: f.wip.qualityHeld,
+      approvedAwaitingPacking: Math.max(num(fin?.released) - (dep('Packing')?.input || 0), 0),
+      packedAwaitingFgInward: Math.max((dep('Carton/Box Packing')?.completed || 0) - (dep('Finished Goods Inward')?.input || 0), 0),
+      inFgAwaitingShipment: Math.max(f.fg.onHand, 0), releasedForShipment: f.fg.availableForShipment, shipped: f.fg.shipped, balance,
+      dueDate: isoDay(due), daysOverdue: due && balance > 0 && new Date(due) < today ? Math.round((today - new Date(due)) / DAY) : null,
+      _link: link('orders', j._id),
+    };
+  }).filter(Boolean);
   return {
     summary: { jobs: rows.length, fgAvailable: sum(rows, 'available'), held: sum(rows, 'held'), shipped: sum(rows, 'shipped'), balance: sum(rows, 'balance'), late: rows.filter((r) => r.delayReason).length },
     tables: {
       pending: T('Finished Goods Pending Shipment', [...JOB_COLS, c('colors', 'Colours'), c('sizes', 'Sizes'), N('orderQty', 'Order'), N('produced', 'Produced'), N('qualityApproved', 'Quality approved'), N('rejected', 'Rejected'), N('rework', 'Rework pending'), N('held', 'Held'), N('packed', 'Packed'), N('cartonPacked', 'Carton packed'), N('fgInward', 'FG inward'), N('available', 'FG available'), N('shipped', 'Shipped'), N('balance', 'Balance'), c('shipmentStatus', 'Shipment status'), c('deliveryDate', 'Delivery'), c('delayReason', 'Delay reason'), c('basis', 'Basis')], rows),
+      pipeline: T('Finished output pipeline – awaiting final QC, packing and shipment; overdue deliveries', [...JOB_COLS, N('orderQty', 'Order'), N('ironed', 'Ironed'), N('awaitingFinalQc', 'Awaiting final QC'), N('onQualityHold', 'On quality hold'), N('approvedAwaitingPacking', 'QC-approved, awaiting packing'), N('packedAwaitingFgInward', 'Packed, awaiting FG inward'), N('inFgAwaitingShipment', 'In FG, awaiting shipment'), N('releasedForShipment', 'Released for shipment'), N('shipped', 'Shipped'), N('balance', 'Order balance'), c('dueDate', 'Due'), N('daysOverdue', 'Days overdue')], pipeline),
     },
   };
 }
@@ -377,7 +401,7 @@ export async function expenseReport(q) {
   const EC = [c('date', 'Date'), c('enteredIn', 'Entered in'), c('category', 'Category'), c('department', 'Department'), c('payee', 'Payee'), c('referenceNo', 'Bill no'), c('description', 'Description'), c('jobNo', 'Job'), N('amount', 'Amount', 2), c('sharing', 'Allocation'), N('share', 'This scope’s share', 2), c('paymentStatus', 'Payment'), N('paid', 'Paid', 2), c('status', 'Approval'), c('recurring', 'Recurring'), c('ref', 'Ref', { link: true })];
   return {
     period: p.label,
-    summary: { approved: r2(sum(approved, 'share')), pendingApproval: rows.filter((r) => r.status === 'Pending').length, pendingAmount: r2(sum(rows.filter((r) => r.status === 'Pending'), 'share')), unpaid: r2(sum(approved, (r) => r.share * (1 - (r.amount ? r.paid / r.amount : 0)))), quality: r2(sum(approved.filter((r) => r.quality), 'share')), shared: r2(sum(approved.filter((r) => r.sharing?.startsWith('Shared')), 'share')) },
+    summary: { approved: r2(sum(approved, 'share')), pendingApproval: rows.filter((r) => r.status === 'Pending').length, pendingAmount: r2(sum(rows.filter((r) => r.status === 'Pending'), 'share')), unpaid: r2(sum(approved.filter((r) => r.category !== 'Depreciation'), (r) => r.share * (1 - (r.amount ? r.paid / r.amount : 0)))), quality: r2(sum(approved.filter((r) => r.quality), 'share')), shared: r2(sum(approved.filter((r) => r.sharing?.startsWith('Shared')), 'share')) },
     tables: {
       register: T('Factory expense register', EC, rows),
       category: T('Category-wise (approved)', [c('category', 'Category'), N('share', 'Amount', 2), N('paid', 'Paid', 2), c('sources', 'Records')], group(approved, ['category'], S).sort((a, b) => b.share - a.share)),
@@ -495,7 +519,7 @@ async function periodPnl(q) {
   payments.forEach((x) => { cash(x.paymentDate, x.businessUnit, 'Receipts from buyers', num(x.amount), x.reference || x.refNo, link('payment', x._id)); cash(x.paymentDate, x.businessUnit, 'Bank charges', -num(x.bankCharges), x.refNo, link('payment', x._id)); });
   bills.forEach((b) => (b.payments || []).forEach((pm) => cash(pm.date, b.businessUnit, 'Payments to suppliers', -num(pm.amount), `${b.billNo} ${pm.reference || ''}`, link('supplierBill', b._id))));
   payrolls.forEach((x) => cash(x.paymentDate, x.businessUnit, 'Salaries & wages paid', -num(x.totalCost), x.refNo, link('payroll', x._id)));
-  fexp.forEach((e) => { if (num(e.paidAmount) > 0) units.forEach((u) => { const share = expenseShare(e, u); if (share) cash(e.paymentDate || e.expenseDate, u, 'Factory expenses paid', -round((share * num(e.paidAmount)) / num(e.amount), 2), e.refNo, link('factoryExpense', e._id)); }); });
+  fexp.forEach((e) => { if (num(e.paidAmount) > 0 && e.category !== 'Depreciation') units.forEach((u) => { const share = expenseShare(e, u); if (share) cash(e.paymentDate || e.expenseDate, u, 'Factory expenses paid', -round((share * num(e.paidAmount)) / num(e.amount), 2), e.refNo, link('factoryExpense', e._id)); }); });
   expenses.forEach((e) => cash(e.expenseDate, e.businessUnit, 'Job & company expenses (booked)', -num(e.amount), e.refNo, link('expense', e._id)));
   const cashBuckets = [...new Set(C.map(keyOf))].sort().map((b) => {
     const rows = C.filter((x) => keyOf(x) === b);

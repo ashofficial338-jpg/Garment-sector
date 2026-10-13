@@ -89,16 +89,30 @@ const REJ = { Preparation: 0.001, 'Sewing and Stitching': 0.003, 'Quality Contro
 const RW = { 'Sewing and Stitching': 0.015, Checking: 0.02, 'Quality Control': 0.025, 'Ironing and Finishing': 0.01, 'Thread Trimming and Alteration': 0.03 };
 const DELAYS = ['Machine breakdown', 'Needle / bobbin change', 'Waiting for input / cut panels', 'Style changeover', 'Power failure'];
 
+/** Typical defects found at each inspection stage: [major defects, minor defects, responsible department]. */
+const STAGE_DEFECTS = {
+  'Fabric Inspection': [['Hole / fabric damage', 'Shade variation', 'Stain / spot'], ['Fabric fault (slub / yarn)'], 'Cutting'],
+  'Cutting Panel Inspection': [['Shade variation', 'Hole / fabric damage'], ['Stain / spot'], 'Cutting'],
+  'Bundle Inspection': [['Damaged component'], ['Wrong / missing label'], 'Cutting Issue'],
+  'Component Inspection': [['Damaged component', 'Measurement out of tolerance'], ['Uneven stitch'], 'Preparation'],
+  'Measurement Check': [['Measurement out of tolerance'], ['Uneven hem'], 'Sewing and Stitching'],
+  'Finishing Inspection': [['Ironing defect (shine / burn)', 'Stain / spot'], ['Pressing / crease'], 'Ironing and Finishing'],
+  'Packing & Carton Inspection': [['Packing error', 'Wrong / missing label'], ['Packing error'], 'Packing'],
+  'Finished Goods Approval': [['Packing error'], ['Pressing / crease'], 'Finished Goods Inward'],
+};
 /** Defect lines that make an AQL lot pass (or fail) for its sample size. */
-function defects(lot, pass, majorAql = '2.5', minorAql = '4.0', seed = 0) {
+function defects(lot, pass, majorAql = '2.5', minorAql = '4.0', rawSeed = 0, stage = '') {
+  const seed = Math.abs(rawSeed);
   const ac = aqlEvaluate({ lotSize: lot, majorAql, minorAql });
-  const MAJ = ['Skip stitch', 'Open seam', 'Broken stitch', 'Measurement out of tolerance', 'Shade variation', 'Stain / spot'];
-  const MIN = ['Loose thread', 'Uneven hem', 'Pressing / crease', 'Puckering', 'Wrong / missing label'];
+  const own = STAGE_DEFECTS[stage];
+  const MAJ = own?.[0] || ['Skip stitch', 'Open seam', 'Broken stitch', 'Measurement out of tolerance', 'Shade variation', 'Stain / spot'];
+  const MIN = own?.[1] || ['Loose thread', 'Uneven hem', 'Pressing / crease', 'Puckering', 'Wrong / missing label'];
+  const dept = own?.[2];
   const major = pass ? Math.min(1, ac.majorAccept) : ac.majorAccept + 2 + (seed % 3);
   const minor = pass ? Math.min(2 + (seed % 2), ac.minorAccept) : ac.minorAccept;
   const lines = [];
-  if (major) lines.push({ defectType: MAJ[seed % MAJ.length], severity: 'Major', location: 'Side seam', responsibleDept: 'Sewing and Stitching', count: major });
-  if (minor) lines.push({ defectType: MIN[seed % MIN.length], severity: 'Minor', location: 'Hem / neck', responsibleDept: 'Thread Trimming and Alteration', count: minor });
+  if (major) lines.push({ defectType: MAJ[seed % MAJ.length], defectCode: `D-${String((seed % 9) + 11)}`, severity: 'Major', location: dept ? 'Panel / roll' : 'Side seam', responsibleDept: dept || 'Sewing and Stitching', count: major });
+  if (minor) lines.push({ defectType: MIN[seed % MIN.length], defectCode: `D-${String((seed % 7) + 31)}`, severity: 'Minor', location: dept ? 'Surface' : 'Hem / neck', responsibleDept: dept || 'Thread Trimming and Alteration', count: minor });
   return lines;
 }
 
@@ -130,7 +144,7 @@ export async function flowProduction(api, c) {
     return sheet;
   };
   const inspect = async (stage, k, lot, { pass = true, disposition, method = 'AQL sampling', time = '15:30', who = inspector, agency = 'In-house QA', seed = 0 } = {}) => {
-    const r = await api.post('/m/inspection', { job: jobNo, inspectionDate: day(k), inspectionTime: time, inspectionStage: stage, inspectionMethod: method, inspector: who, inspectionAgency: agency, lotSize: lot, line, color: spec.fabric.color, bundleNo: `B-${jobNo.split('-').slice(1).join('')}-${counters.bundle = (counters.bundle || 100) + 1}`, defectLines: defects(lot, pass, '2.5', '4.0', seed + counters.line), ...(disposition || { passQty: pass ? lot : undefined }) });
+    const r = await api.post('/m/inspection', { job: jobNo, inspectionDate: day(k), inspectionTime: time, inspectionStage: stage, inspectionMethod: method, inspector: who, inspectionAgency: agency, lotSize: lot, line, color: spec.fabric.color, bundleNo: `B-${jobNo.split('-').slice(1).join('')}-${counters.bundle = (counters.bundle || 100) + 1}`, defectLines: defects(lot, pass, '2.5', '4.0', seed + counters.line, stage), ...(disposition || { passQty: pass ? lot : undefined }) });
     const done = await api.status('inspection', r._id, 'Inspection', r.aqlResult === 'Passed' ? 'Passed' : 'Failed');
     if (done.status !== (pass ? 'Passed' : 'Failed')) throw new Error(`${jobNo}: ${stage} expected ${pass ? 'pass' : 'fail'}, got ${done.status}`);
     return done;
@@ -164,9 +178,12 @@ export async function flowProduction(api, c) {
 
   // cutting: the hourly board of each lay (the lay register itself is the Cutting entry)
   const cutByDay = new Map();
+  // fabric inspection of the rolls issued to the job (4-point audit, sampling)
+  await inspect('Fabric Inspection', lays[0].day - 1, lays.reduce((t, l) => t + l.pcs, 0), { method: 'Random sampling', time: '09:30', seed: 8 });
   for (const l of lays) {
-    await post('Cutting', l.day, l.pcs, l.pcs - l.reject, l.reject, 0, Math.ceil(l.pcs / 6));
+    const sh = await post('Cutting', l.day, l.pcs, l.pcs - l.reject, l.reject, 0, Math.ceil(l.pcs / 6));
     cutByDay.set(l.day, (cutByDay.get(l.day) || 0) + l.pcs - l.reject);
+    await inspect('Cutting Panel Inspection', l.day, sh.completedQty, { method: 'Random sampling', time: '17:30', seed: 9 + l.day });
   }
   if (target === 'cutting') return { S, lastDay: lays[lays.length - 1].day };
 
@@ -191,7 +208,13 @@ export async function flowProduction(api, c) {
       const sh = await post(dept, k, take, take - rej, rej, rw, Math.round((CAP[dept] * sewCap) / 8));
       moved += take; lastDay = k;
       // quality inspections at their stages
-      if (dept === 'Sewing and Stitching' && S[dept].in === sh.inputQty) await inspect('In-line Inspection', k, sh.inputQty, { method: 'Random sampling', time: '11:00', seed: 1 });
+      if (dept === 'Sewing and Stitching' && S[dept].in === sh.inputQty) {
+        await inspect('In-line Inspection', k, sh.inputQty, { method: 'Random sampling', time: '11:00', seed: 1 });
+        await inspect('Measurement Check', k, Math.min(sh.completedQty, 125), { method: 'Measurement check', time: '14:00', seed: 10 });
+      }
+      if (dept === 'Cutting Issue') await inspect('Bundle Inspection', k, sh.completedQty, { method: 'Random sampling', time: '12:00', seed: 11 });
+      if (dept === 'Preparation') await inspect('Component Inspection', k, sh.completedQty, { method: 'Random sampling', time: '13:00', seed: 12 });
+      if (dept === 'Finished Goods Inward') await inspect('Finished Goods Approval', k, sh.completedQty, { method: 'AQL sampling', time: '18:00', seed: 13 });
       if (dept === 'Checking') {
         endline += 1;
         // the second end-line audit of a job fails: lot held, reworked and reinspected (closed the next day)
@@ -199,6 +222,7 @@ export async function flowProduction(api, c) {
         const ins = await inspect('End-line Inspection', k, sh.completedQty, failing ? { pass: false, disposition: { passQty: 0, heldQty: sh.completedQty }, time: '16:00', seed: 2 } : { time: '16:00', seed: 3 });
         if (failing) due.push({ k: k + 1, run: async () => { await resolve(ins, k + 1, sh.completedQty); return 0; } });
       }
+      if (dept === 'Ironing and Finishing' && sh.completedQty > 0) await inspect('Finishing Inspection', k, sh.completedQty, { method: 'Random sampling', time: '15:00', seed: 14 });
       if (dept === 'Ironing and Finishing' && lim.Folding !== 0 && sh.completedQty > 0) {
         lotNo += 1;
         const L = sh.completedQty;
@@ -220,6 +244,14 @@ export async function flowProduction(api, c) {
     }
     if (moved || due.length) idle = 0; else idle += 1;
     k += 1;
+  }
+  if (target === 'sewing') {
+    // mid-production: an in-line audit found a batch with open seams – held, rework in progress; and the latest
+    // measurement-check lot is submitted and waiting for QA
+    const firstSew = lastDay;
+    const held = await inspect('In-line Inspection', firstSew, 60, { pass: false, disposition: { passQty: 20, heldQty: 40 }, method: 'Random sampling', time: '15:30', seed: 2 });
+    await resolve(held, firstSew, 40, { open: true });
+    await api.post('/m/inspection', { job: jobNo, inspectionDate: day(Math.min(lastDay + 1, 0)), inspectionTime: '10:00', inspectionStage: 'Measurement Check', inspectionMethod: 'Measurement check', inspector, lotSize: 32, line, color: spec.fabric.color, remarks: 'Submitted by the line – awaiting QA measurement' });
   }
   if (target !== 'sewing' && target !== 'packingPartial' && S['Carton/Box Packing'].out) {
     await inspect('Packing & Carton Inspection', lastDay, S['Carton/Box Packing'].out, { method: 'Random sampling', time: '17:00', seed: 6 });
@@ -249,6 +281,34 @@ export async function preShipment(api, c, lot, dd, agency) {
   const r = await api.post('/m/inspection', { job: jobNo, inspectionDate: c.day(dd), inspectionTime: '10:30', inspectionStage: 'Pre-shipment Inspection', inspectionMethod: 'AQL sampling', inspector: 'Buyer QA', inspectionAgency: agency || `${spec.buyer} QA`, lotSize: lot, passQty: lot, defectLines: defects(lot, true, '2.5', '4.0', 7) });
   await api.status('inspection', r._id, 'Inspection', 'Passed', 'Final Approved');
   return r;
+}
+
+/* ------------------------------ fabric stock chain ------------------------------ */
+/**
+ * Yarn bought by the unit, knitted into grey fabric, dyed and compacted into finished fabric – one completed chain for a
+ * knit job, one still in process (open knitting and processing, pending quantities at the vendors).
+ */
+export async function fabricStockChain(api, unit, ids, day, jobs) {
+  const sup = (n) => ids.suppliers[n];
+  const s = unit === 'U1' ? 1 : 0.7;
+  let n = 0;
+  const go = async (key, body, ...statuses) => { const r = await api.post(`/m/${key}`, body); if (statuses.length) await api.status(key, r._id, ...statuses); n += 1; return r; };
+  const yarn = unit === 'U1' ? [['30s Combed Cotton', 'L-3011', 4200, -62], ['24s Combed Cotton', 'L-2408', 2600, -40]] : [['30s Combed Cotton', 'L-3102', 3000, -58], ['20s Cotton/Poly 60:40', 'K-2015', 1800, -36]];
+  for (const [count, lot, kg, d] of yarn) {
+    await go('yarnReceipt', { receiptDate: day(d), supplier: sup('Sri Ramakrishna Spinning Mills'), yarnCount: count, composition: count.replace(/^\d+s /, ''), lotNo: `${unit}-${lot}`, invoiceNo: `SRSM/${unit}/${lot}`, bags: Math.round(kg / 50), qtyKg: Math.round(kg * s), ratePerKg: count.startsWith('20s') ? 2.45 : count.startsWith('24s') ? 2.75 : 2.95, remarks: 'Sample / Test data' }, 'Inspected', 'Approved');
+  }
+  const [y1, y2] = yarn;
+  const fab1 = unit === 'U1' ? 'Waffle Knit 200 GSM' : '100% Cotton Single Jersey';
+  const fab2 = unit === 'U1' ? 'Single Jersey 180 GSM' : 'Pique 220 GSM';
+  // completed chain for the knit job
+  const k1 = await go('knitting', { job: jobs.knit, programDate: day(y1[3] + 4), supplier: sup('Tirupur Knit Fab'), yarnCount: y1[0], lotNo: `${unit}-${y1[1]}`, fabricType: fab1, gsm: unit === 'U1' ? 200 : 160, dia: 72, gauge: '24G', yarnIssuedKg: Math.round(1600 * s), greyReceivedKg: Math.round(1600 * s * 0.972), rejectedKg: 4, allowedLossPct: 3, ratePerKg: 0.22 }, 'Yarn Issued', 'In Knitting', 'Completed');
+  const dyed = Math.round(k1.greyReceivedKg * 0.93);
+  await go('fabricProcess', { job: jobs.knit, processDate: day(y1[3] + 10), supplier: sup('Royal Dyeing & Processing'), processType: 'Dyeing', inputStage: 'Grey Fabric', outputStage: 'In-process Fabric', fabricType: fab1, color: unit === 'U1' ? 'Olive' : 'Navy', gsm: k1.gsm, dia: 72, batchNo: `${unit}-B${Math.abs(y1[3])}`, issuedKg: k1.greyReceivedKg, receivedKg: dyed, rejectedKg: 0, allowedLossPct: 8, ratePerKg: 1.15, chargeBasis: 'Issued Kg' }, 'In Process', 'Received', 'Completed');
+  await go('fabricProcess', { job: jobs.knit, processDate: day(y1[3] + 15), supplier: sup('Vetri Compacting Works'), processType: 'Open Width Compacting', inputStage: 'In-process Fabric', outputStage: 'Finished Fabric', fabricType: fab1, color: unit === 'U1' ? 'Olive' : 'Navy', gsm: k1.gsm, dia: 72, batchNo: `${unit}-C${Math.abs(y1[3])}`, issuedKg: dyed, receivedKg: Math.round(dyed * 0.985), rejectedKg: 0, allowedLossPct: 2, ratePerKg: 0.11, chargeBasis: 'Issued Kg' }, 'In Process', 'Received', 'Completed');
+  // a second program still running (grey and dyeing pending at the vendors)
+  const k2 = await go('knitting', { job: jobs.next || undefined, programDate: day(y2[3] + 5), supplier: sup('Tirupur Knit Fab'), yarnCount: y2[0], lotNo: `${unit}-${y2[1]}`, fabricType: fab2, gsm: unit === 'U1' ? 180 : 220, dia: 68, gauge: '24G', yarnIssuedKg: Math.round(1400 * s), greyReceivedKg: Math.round(900 * s), allowedLossPct: 3, ratePerKg: 0.2, remarks: 'Knitting in progress' }, 'Yarn Issued', 'In Knitting');
+  await go('fabricProcess', { job: jobs.next || undefined, processDate: day(-6), supplier: sup('Royal Dyeing & Processing'), processType: 'Dyeing', inputStage: 'Grey Fabric', outputStage: 'Finished Fabric', fabricType: fab2, color: unit === 'U1' ? 'Coral' : 'White', gsm: k2.gsm, dia: 68, batchNo: `${unit}-B06`, issuedKg: Math.round(k2.greyReceivedKg * 0.8), receivedKg: Math.round(k2.greyReceivedKg * 0.45), allowedLossPct: 8, ratePerKg: 1.1, chargeBasis: 'Issued Kg' }, 'In Process');
+  return n;
 }
 
 /* ------------------------------ attendance & payroll ------------------------------ */
@@ -325,6 +385,8 @@ export async function factoryExpenses(api, unit, day, TODAY, jobs) {
       { category: 'Production Consumables', payee: 'Groz-Beckert needles & machine oil', referenceNo: `GBN-${unit}-${period}`, amount: Math.round(90 * s), rel: at(7), paymentStatus: P('Paid'), department: 'Sewing and Stitching' },
       { category: 'QC Materials & Testing', payee: 'Datacolor light box lamps & tapes', referenceNo: `QCM-${unit}-${period}`, amount: 30, rel: at(10), paymentStatus: P('Paid'), department: 'Quality Inspection' },
     );
+    // machinery depreciation (straight-line) – a non-cash monthly charge, a period cost below EBITDA
+    rows.push({ category: 'Depreciation', payee: 'Fixed asset register – machinery (SLM 10 %)', referenceNo: `DEP-${unit}-${period}`, amount: Math.round(650 * s), recurring: true, period, rel: at(28), paymentStatus: 'Unpaid', description: `Machinery depreciation ${period} (non-cash)` });
     if (unit === 'U1') rows.push({ category: 'Rent', payee: 'Sri Lakshmi Estates', referenceNo: `RENT-${period}`, amount: 2000, recurring: true, period, rel: at(1), paymentStatus: P('Paid'), sharing: 'Shared – Unit-1 & Unit-2', sharePctU1: 60, description: 'Factory building rent – shared 60 / 40 by floor area' });
     if (unit === 'U2') rows.push({ category: 'Security', payee: 'Eagle Security Services', referenceNo: `SEC-${period}`, amount: 600, recurring: true, period, rel: at(1), paymentStatus: P('Paid'), sharing: 'Shared – Unit-1 & Unit-2', sharePctU1: 50, description: 'Campus security – shared equally' });
   }

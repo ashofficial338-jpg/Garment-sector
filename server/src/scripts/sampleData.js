@@ -38,7 +38,7 @@ import { loadJobGraphs, computeProfit, computeStages } from '../services/lifecyc
 import { num, sum, round } from '../../../shared/calc.js';
 import { TRACKING_LISTS } from '../../../shared/tracking.js';
 import { RETURN_TO_STORE, RETURN_TO_SUPPLIER, ADJUST_SHORT, ADJUST_EXCESS } from '../../../shared/modules/planning.js';
-import { ensureWorkforce, configureQuality, flowProduction, flowPackingList, preShipment, attendanceSheets, payrolls, factoryExpenses, negativeTests } from './sampleFactory.js';
+import { fabricStockChain, ensureWorkforce, configureQuality, flowProduction, flowPackingList, preShipment, attendanceSheets, payrolls, factoryExpenses, negativeTests } from './sampleFactory.js';
 
 const APPLY = process.argv.includes('--apply');
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -161,6 +161,8 @@ const SUPPLIERS = [
   { name: 'Maersk Logistics', supplierType: 'Logistics' }, { name: 'SGS Testing', supplierType: 'Testing Lab' },
   { name: 'Bright Wash Industries', supplierType: 'Washing' }, { name: 'Colour Print Hub', supplierType: 'Printing' }, { name: 'Stitch Art Embroidery', supplierType: 'Embroidery' },
   { name: 'Coats Thread India', supplierType: 'Accessories' },
+  { name: 'Sri Ramakrishna Spinning Mills', supplierType: 'Yarn' }, { name: 'Tirupur Knit Fab', supplierType: 'Knitting' },
+  { name: 'Royal Dyeing & Processing', supplierType: 'Fabric Processing' }, { name: 'Vetri Compacting Works', supplierType: 'Fabric Processing' },
 ];
 /** Buyer contacts (filled in only where a buyer has none). */
 const CONTACTS = {
@@ -244,7 +246,7 @@ const JOBS = {
       trims: [...KNIT_TRIMS, { item: 'Button', description: 'Pearl 2-hole 16L', consumptionPerPc: 3, unit: 'Pcs', wastagePct: 4, rate: 0.015 }], sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [48, 66, 18, 17], sam: 11.5, orderDays: -95, shipDays: -6,
       costing: { trimCost: 0.26, cuttingCost: 0.07, sewingCost: 0.95, finishingCost: 0.14, packingCost: 0.08, labourCost: 0.06, factoryOverhead: 0.22, testingCost: 0.04, freightCost: 0.12, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 13 },
       expenses: [['Sewing / CMT', 0.98], ['Finishing', 0.15], ['Packing', 0.08]], payPart: 0.4 },
-    { key: 'U1-HOODIE', flow: true, countAdjust: { type: ADJUST_SHORT, qty: 2.4 }, buyer: 'Urban Threads Inc', styleNo: 'UT-HD-330', product: 'Unisex Pullover Hoodie', garmentType: 'Hoodie', poNo: 'UTI-91407', destination: 'Los Angeles', price: 11.8, qty: 3500, stage: 'readyToShip',
+    { key: 'U1-HOODIE', flow: true, countAdjust: { type: ADJUST_SHORT, qty: 2.4 }, buyer: 'Urban Threads Inc', styleNo: 'UT-HD-330', product: 'Unisex Pullover Hoodie', garmentType: 'Hoodie', poNo: 'UTI-91407', destination: 'Los Angeles', price: 11.8, qty: 3500, stage: 'partShipped',
       fabric: { fabricType: 'French Terry 300 GSM', composition: '80% Cotton 20% Polyester', gsm: 300, width: 72, color: 'Heather Grey', unit: 'KG', consumption: 0.62, wastagePct: 6, rate: 6.1 },
       trims: [...KNIT_TRIMS, { item: 'Drawcord', description: 'Flat cotton drawcord 140 cm with metal tips', consumptionPerPc: 1, unit: 'Pcs', wastagePct: 3, rate: 0.11 }], sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [60, 72, 64, 20], sam: 17.5, orderDays: -70, shipDays: 12,
       costing: { trimCost: 0.31, cuttingCost: 0.12, sewingCost: 1.55, finishingCost: 0.2, washingCost: 0.25, packingCost: 0.1, labourCost: 0.09, factoryOverhead: 0.35, testingCost: 0.05, freightCost: 0.22, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
@@ -278,8 +280,8 @@ const JOBS = {
       forecastPlan: { supplier: 'Arvind Mills', supplierPoNo: 'AM/OX/26-1187', lotNo: 'OX-LB-5531', received: 10400, receivedDays: -58 },
       subJobs: [
         { qty: 3000, fabric: 5040, day: -56, ship: -8, ref: 'BM-PO-77310 drop 1', poNo: 'BM-PO-77310-D1', color: 'Light Blue', stage: 'readyToClose' },
-        { qty: 2000, fabric: 3360, day: -25, ship: 18, ref: 'BM-PO-77310 drop 2', poNo: 'BM-PO-77310-D2', color: 'Light Blue', stage: 'partShipped' },
-        { qty: 1000, fabric: 1700, day: -10, ship: 60, ref: 'BM-PO-77310 drop 3', poNo: 'BM-PO-77310-D3', color: 'Light Blue', stage: 'planning' },
+        { qty: 2000, fabric: 3360, day: -25, ship: -2, ref: 'BM-PO-77310 drop 2', poNo: 'BM-PO-77310-D2', color: 'Light Blue', stage: 'partShipped' },
+        { qty: 1000, fabric: 1700, day: -24, ship: 60, ref: 'BM-PO-77310 drop 3', poNo: 'BM-PO-77310-D3', color: 'Light Blue', stage: 'sewing' },
       ] },
     { key: 'U2-CHINO', buyer: 'Sakura Lifestyle KK', styleNo: 'SL-CH-205', product: "Women's Stretch Twill Chino", garmentType: 'Trouser', poNo: 'SLK-24-5582', destination: 'Yokohama', price: 9.4, qty: 4000, stage: 'closed',
       fabric: { fabricType: 'Stretch Cotton Twill 7 oz', composition: '98% Cotton 2% Elastane', gsm: 240, width: 57, color: 'Khaki', unit: 'Meter', consumption: 1.35, wastagePct: 5, rate: 3.4 },
@@ -588,7 +590,9 @@ async function runJob(api, unit, jobNo, spec, target, ids, counters) {
     const eff = 0.55 + ((d * 7) % 13) / 100;
     const out = Math.min(sewTarget - sewn, Math.round((operators * 480 * eff) / spec.sam));
     const checked = out; const defects = Math.round(out * (0.018 + ((d * 3) % 7) / 1000));
-    await api.post('/m/sewing', { job: jobNo, entryDate: day(d), floor: 'Floor 1', line, supervisor: unit === 'U1' ? 'K. Lakshmi' : 'S. Fathima', operators, helpers: Math.round(operators / 4), sam: spec.sam, workingMinutes: 480, inputQty: out + 40, targetQty: Math.round((operators * 480 * 0.62) / spec.sam), manualOutput: out, checkedQty: checked, defects, alteration: Math.round(defects * 0.7), rejection: Math.round(out * 0.004) });
+    await api.post('/m/sewing', { job: jobNo, entryDate: day(d), floor: 'Floor 1', line, supervisor: unit === 'U1' ? 'K. Lakshmi' : 'S. Fathima', operators, helpers: Math.round(operators / 4), sam: spec.sam, workingMinutes: 480, inputQty: out + 40, targetQty: Math.round((operators * 480 * 0.62) / spec.sam), manualOutput: out, checkedQty: checked, defects, alteration: Math.round(defects * 0.7), rejection: Math.round(out * 0.004),
+      // operator-wise production of the key operations (sewing operators of the unit's workforce)
+      operatorOutput: [['F009', 'Shoulder join', 0.6], ['F010', 'Side seam', 1.1], ['F011', 'Bottom hem', 0.8]].map(([code, operation, smv], i) => ({ empCode: `SMP-${unit}-${code}`, operatorName: `Operator ${code}`, operation, smv, pieces: Math.round((480 * (0.62 + i * 0.04)) / smv) })) });
     sewn += out; d += 1;
   }
   // QC: in-line (roving) inspection while the line runs, end-line inspection of the sewn output; the result
@@ -936,6 +940,27 @@ async function buildDataset() {
       }
     }
   }
+  // order amendment: the buyer raised the quantity and moved the delivery (an order revision with its reason)
+  const shorts = created.U1.find((x) => x.spec.key === 'U1-SHORTS').job;
+  await u1.put(`/jobs/${shorts._id}`, {
+    orderQty: 8400, shipmentDate: day(77), deliveryDate: day(98),
+    sizeBreakdown: [['4Y', 1680], ['6Y', 2520], ['8Y', 2520], ['10Y', 1680]].map(([size, qty]) => ({ color: 'Coral', size, qty })),
+    _revisionReason: 'Buyer amendment KK-62004 A1: +400 pcs, delivery moved one week (Sample / Test data)',
+  });
+  log(`  U1 ${shorts.jobNo} amended: 8000 → 8400 pcs, delivery +7 days (order revision)`);
+  // cancellations: an order cancelled by the buyer after confirmation, and a PO cancelled before a job was opened
+  for (const [unit, api, baseKey, over, why] of [
+    ['U1', u1, 'U1-TANK', { styleNo: 'PCA-CR-12', product: "Women's Cropped Tee", poNo: 'PCA-PO-30811', qty: 3000, orderDays: -16, shipDays: 70 }, 'Buyer cancelled the style – collection dropped (cancellation letter PCA/CXL/118)'],
+    ['U2', u2, 'U2-FLANNEL', { styleNo: 'HO-OS-221', product: "Men's Flannel Shirt Jacket", poNo: 'HOG-4491-26', qty: 1500, orderDays: -14, shipDays: 90 }, 'Buyer cancelled before production – line merged into HO-OS-220 (mail 02-Oct)'],
+  ]) {
+    const { key, stage, hold, ...base } = JOBS[unit].find((x) => x.key === baseKey);
+    const job = await confirmOrder(api, { ...base, ...over }, ids);
+    await api.post(`/jobs/${job._id}/status`, { status: 'Cancelled', reason: why });
+    log(`  ${unit} ${job.jobNo}  ${base.buyer} · ${over.styleNo} – CANCELLED (${why.split(' – ')[0]})`);
+  }
+  const cxl = await u2.post('/m/buyerOrder', { orderType: 'New Order', buyer: ids.buyers['Sakura Lifestyle KK'], poNo: 'SLK-24-5799', styleNo: 'SL-SK-120', product: "Women's Pleated Skirt", garmentType: 'Skirt', orderDate: day(-6), deliveryDate: day(110), shipmentDate: day(89), orderQty: 1800, unitPrice: 11.2, currency: 'USD', color: 'Navy', sizeRatio: 'XS:2,S:3,M:3,L:2', destination: 'Yokohama', remarks: 'Sample / Test data' });
+  await u2.post(`/m/buyerOrder/${cxl._id}/status`, { status: 'Cancelled', reason: 'Buyer withdrew the PO before costing was agreed' });
+  log(`  U2 Buyer PO ${cxl.poNo} received and cancelled before job creation`);
   // buyer POs received today / this week and not yet converted into jobs
   for (const unit of ['U1', 'U2']) {
     const api = unit === 'U1' ? u1 : u2;
@@ -948,6 +973,14 @@ async function buildDataset() {
       if (o.review) await api.status('buyerOrder', bo._id, 'Under Review');
       log(`  ${unit} New order ${bo.refNo}  ${o.buyer} PO ${o.poNo} · ${o.styleNo} · ${o.qty} pcs (${o.orderType}) – awaiting job creation`);
     }
+  }
+  // in-house fabric stock chain per unit: yarn inward → knitting (grey) → dyeing / compacting (finished fabric)
+  for (const [unit, api] of [['U1', u1], ['U2', u2]]) {
+    const n = await fabricStockChain(api, unit, ids, day, {
+      knit: unit === 'U1' ? created.U1.find((x) => x.spec.key === 'U1-HENLEY').job.jobNo : created.U2.find((x) => x.spec.key === 'U2-LOUNGE').job.jobNo,
+      next: unit === 'U1' ? created.U1.find((x) => x.spec.key === 'U1-SHORTS').job.jobNo : null,
+    });
+    log(`  ${unit} fabric stock chain: ${n} yarn / knitting / processing records`);
   }
   // HR: daily attendance for the production window, payroll for every month that has ended; factory expenses
   log('  Attendance, payroll and factory expenses…');
@@ -979,7 +1012,7 @@ async function buildDataset() {
   // company-level finance lines for EBITDA (per unit, last 3 months)
   for (const [unit, api, scale] of [['U1', u1, 1], ['U2', u2, 0.8]]) {
     for (const m of [-60, -30, -2]) {
-      for (const [category, amount, vendor] of [['Admin Expense', 1250, 'Office & admin'], ['Interest', 420, 'Bank – working capital loan'], ['Tax', 380, 'Advance tax'], ['Depreciation', 860, 'Machinery depreciation'], ['Amortization', 120, 'CAD software licence']]) {
+      for (const [category, amount, vendor] of [['Admin Expense', 1250, 'Office & admin'], ['Interest', 420, 'Bank – working capital loan'], ['Tax', 380, 'Advance tax'], ['Depreciation', 210, 'Office equipment & vehicle depreciation'], ['Amortization', 120, 'CAD software licence']]) {
         await api.post('/m/expense', { category, description: `${category} – ${unit} monthly`, expenseDate: day(m), amount: r2(amount * scale), vendor, billNo: `${unit}-GL-${counters.bill++}` });
       }
     }

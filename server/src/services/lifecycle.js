@@ -371,9 +371,11 @@ export async function computeStages(g) {
   // department flow & quality (jobs on hourly production) – every piece accounted for before closure
   const flow = computeFlow({ job, route: g.route || resolveRoute(job, []), sheets: g.hourly || [], inspections: g.inspections, reworks: g.reworks || [], shipments: g.shipments });
   meta.flow = { onFlow: flow.onFlow, route: flow.route.name, wip: flow.wip, fg: flow.fg, issues: flow.issues, departments: flow.departments.map((d) => ({ department: d.department, input: d.input, completed: d.completed, rejected: d.rejected, pending: d.pending, handover: d.handover })) };
-  const openIssues = (g.reworks || []).filter((r) => r.status !== 'Closed');
+  // a main job's sub jobs carry their own quality blockers (reported as "Sub job … not closed")
+  const own = (r) => String(r.job) === String(job._id);
+  const openIssues = (g.reworks || []).filter((r) => r.status !== 'Closed' && own(r));
   if (openIssues.length) blockers.push(`${openIssues.length} quality issue(s) not closed (${openIssues.map((r) => r.refNo).join(', ')})`);
-  const openInsp = g.inspections.filter((i) => ['Pending', 'Inspection'].includes(i.status));
+  const openInsp = g.inspections.filter((i) => ['Pending', 'Inspection'].includes(i.status) && own(i));
   if (openInsp.length) blockers.push(`${openInsp.length} inspection(s) not completed (${openInsp.map((i) => i.refNo).join(', ')})`);
   if (flow.onFlow && !isMain) {
     if (flow.wip.inDepartments > 0) blockers.push(`${flow.wip.inDepartments} pcs still in department WIP (${flow.departments.filter((d) => d.pending > 0).map((d) => `${d.department} ${d.pending}`).join(', ')})`);

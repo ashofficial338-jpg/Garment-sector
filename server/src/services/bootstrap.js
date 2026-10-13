@@ -86,6 +86,11 @@ export async function ensureMasters() {
   add('Shift', SHIFTS);
   add('Hourly Slot', HOURLY_SLOTS);
   add('Delay Reason', ['Machine breakdown', 'Power failure', 'Waiting for input / cut panels', 'Absenteeism', 'Style changeover', 'Quality issue / rework', 'Trims shortage', 'Needle / bobbin change', 'Meeting / training']);
+  add('Carton Type', ['5-ply export carton 60x40x30', '5-ply export carton 60x40x40', '3-ply inner carton', 'Hanger box (GOH)'], (n) => ({ unit: 'Carton', description: 'Corrugated, buyer shipping marks on 2 sides' }));
+  add('Corrective Action Category', ['Machine adjustment / maintenance', 'Operator re-training', 'Method / SOP change', 'Material replacement', 'Supplier corrective action', 'Inspection plan change']);
+  add('Inspection Standard', ['ISO 2859-1 AQL 2.5 / 4.0 (Level II)', 'ISO 2859-1 AQL 1.5 / 2.5 (tightened)', '4-point fabric inspection (ASTM D5430)', '100 % end-line inspection', 'Buyer manual']);
+  add('Accounting Ledger', ['Sales – export', 'Purchase – fabric', 'Purchase – trims', 'Wages & salaries', 'Factory overheads', 'Freight outward', 'Bank charges', 'Sundry debtors', 'Sundry creditors']);
+  add('Barcode Format', ['GS1-128 SSCC (carton)', 'EAN-13 (garment hang tag)', 'UPC-A (US buyers)', 'QR (bundle ticket)']);
   add('Port', ['Tuticorin', 'Chennai', 'Nhava Sheva', 'Mundra', 'Kolkata', 'Gothenburg', 'Felixstowe', 'Hamburg', 'Rotterdam', 'Los Angeles', 'Yokohama', 'Sydney']);
   const have = new Set(await models.master.distinct('masterType'));
   // defect types added in later releases are appended to an existing list (existing values untouched)

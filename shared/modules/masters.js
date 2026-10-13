@@ -44,7 +44,7 @@ export const MASTER_TYPES = [
   'Garment Type', 'Product Category', 'Style', 'Season', 'Buyer Group', 'Size', 'Color', 'Fabric', 'Fabric Composition', 'Trim', 'Accessory',
   'Operation', 'Machine', 'Process', 'Quality Parameter', 'Defect Type', 'Warehouse', 'Location', 'Cost Component', 'Currency', 'Tax Rate',
   'Unit', 'Payment Term', 'Shipment Term', 'Shipment Method', 'Expense Category', 'Costing Template', 'Country', 'Port', 'Department', 'Production Line', 'Floor', 'Wastage Rule',
-  'Shift', 'Hourly Slot', 'Delay Reason',
+  'Shift', 'Hourly Slot', 'Delay Reason', 'Carton Type', 'Corrective Action Category', 'Inspection Standard', 'Accounting Ledger', 'Barcode Format',
 ];
 
 export const master = {
