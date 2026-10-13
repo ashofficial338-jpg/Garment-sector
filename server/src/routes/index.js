@@ -21,10 +21,12 @@ import { getSetting } from '../services/settings.js';
 
 const api = express.Router();
 
-// Health check for Render / uptime monitors – fails when the database is unreachable
+// Health check for Render / uptime monitors – fails when the database is unreachable.
+// `version` is the deployed git commit (set by Render), so an outdated backend is easy to spot.
+const version = (process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || 'local').slice(0, 7);
 api.get('/health', (_req, res) => {
   const db = mongoose.connection.readyState === 1;
-  res.status(db ? 200 : 503).json({ ok: db, db: db ? 'connected' : 'disconnected', time: new Date().toISOString() });
+  res.status(db ? 200 : 503).json({ ok: db, db: db ? 'connected' : 'disconnected', version, time: new Date().toISOString() });
 });
 api.use('/auth', authRoutes);
 
