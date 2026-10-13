@@ -31,7 +31,7 @@ export const CLOSURE_REGISTER_COLUMNS = [
 
 /** Display order of transaction types on the same day (process order). */
 const SEQ = ['Buyer Enquiry', 'Costing', 'Quotation', 'Buyer PO', 'Job Opened', 'Sub Job Opened', 'Order Revision', 'Specification', 'BOM', 'CAD / Pattern', 'Marker',
-  'Fabric Purchase', 'Fabric Forecast Purchase', 'Fabric Inward', 'Fabric Transfer In', 'Fabric Transfer Out', 'Fabric Issue', 'Fabric Return', 'Fabric Debit Note', 'Fabric Consumed', 'Fabric Job Closed',
+  'Fabric Purchase', 'Fabric Forecast Purchase', 'Fabric Inward', 'Fabric Transfer In', 'Fabric Transfer Out', 'Fabric Reservation', 'Fabric Issue', 'Fabric Return', 'Fabric Debit Note', 'Fabric Consumed', 'Fabric Job Closed',
   'Fabric Stock Adjustment', 'Trim Purchase', 'Trim Inward', 'Cutting', 'Sewing', 'Finishing', 'Quality Inspection', 'Packing → Finished Goods', 'Shipment → Finished Goods Out', 'Invoice', 'Payment', 'Supplier Bill', 'Supplier Payment', 'Expense',
   'Standard Cost Applied', 'Document', 'Job Closed'];
 
@@ -89,7 +89,9 @@ export async function buildJobClosureReport(jobDoc, { withMoney = true } = {}) {
     description: `${t.fabric} lot ${t.lotNo || '—'} → ${t.toJobNo} (${t.toUnit}) · ${t.reason} · ${t.referenceDoc || ''}`, qty: -num(t.qty), unit: t.unit }));
   g.allocations.forEach((a) => {
     const b = bookingById.get(String(a.booking));
-    add(a, { date: a.allocationDate, department: 'Fabric Department', txType: 'Fabric Issue', module: 'fabricAllocation', description: `${a.totalRolls} roll(s) / lot(s) to cutting ${a.cuttingTable || ''} · from ${b?.refNo}`, qty: a.totalQty, unit: a.unit, rate: b?.rate, amount: r2(num(a.totalQty) * num(b?.rate)) });
+    // 'Allocated' = rolls reserved for cutting (held in store, not issued); 'Issued to Cutting' = issued
+    const reserved = a.status === 'Allocated';
+    add(a, { date: a.allocationDate, department: 'Fabric Department', txType: reserved ? 'Fabric Reservation' : 'Fabric Issue', module: 'fabricAllocation', description: `${a.totalRolls} roll(s) / lot(s) ${reserved ? 'reserved for' : 'to'} cutting ${a.cuttingTable || ''} · from ${b?.refNo}${reserved ? ' · held in store, not issued' : ''}`, qty: a.totalQty, unit: a.unit, rate: b?.rate, amount: r2(num(a.totalQty) * num(b?.rate)) });
   });
   // signed by the effect on the fabric store: + back into store (from cutting, count excess), − out (to supplier, count shortage)
   const intoStore = (r) => [RETURN_TO_STORE, ADJUST_EXCESS].includes(r.returnType);
@@ -121,7 +123,7 @@ export async function buildJobClosureReport(jobDoc, { withMoney = true } = {}) {
   // ---------- production, quality, finished goods ----------
   g.cutting.forEach((c) => add(c, { date: c.entryDate, department: 'Cutting', txType: 'Cutting', module: 'cutting', description: `Lay ${c.layNo || '—'} · ${c.plies || 0} plies · marker ${c.markerNo || '—'} · fabric used ${r3(c.fabricUsed)}${num(c.rejectQty) ? ` · reject ${c.rejectQty}` : ''}`, qty: c.cutQty, unit: 'pcs' }));
   g.sewing.forEach((s) => add(s, { date: s.entryDate, department: 'Sewing', txType: 'Sewing', module: 'sewing', description: `${s.line} · eff ${s.efficiencyPct}% · DHU ${s.dhu ?? '—'} · rejection ${s.rejection || 0}`, qty: s.actualQty, unit: 'pcs' }));
-  g.finishing.forEach((f) => add(f, { date: f.entryDate, department: 'Finishing', txType: 'Finishing', module: 'finishing', description: `Input ${f.inputQty} · passed ${f.passedQty} · rejection ${f.rejection || 0}`, qty: f.passedQty, unit: 'pcs' }));
+  g.finishing.forEach((f) => add(f, { date: f.entryDate, department: 'Finishing', txType: 'Finishing', module: 'finishing', description: `${f.process && f.process !== 'All' ? `${f.process} · ` : ''}Input ${f.inputQty} · passed ${f.passedQty} · alteration ${f.alteration || 0} · rework ${f.rework || 0} · rejection ${f.rejection || 0}${num(f.ironedQty) ? ` · ironed ${f.ironedQty}` : ''}${num(f.needleCheckedQty) ? ` · needle-checked ${f.needleCheckedQty}, metal found ${f.needleFailQty || 0}` : ''}`, qty: f.passedQty, unit: 'pcs' }));
   g.inspections.forEach((i) => add(i, { date: i.inspectionDate, department: 'Quality', txType: 'Quality Inspection', module: 'inspection', description: `${i.inspectionType} · lot ${i.lotSize} · ${i.inspectionAgency || ''} · defects ${i.totalDefects ?? '—'} · AQL ${i.aqlResult || '—'}`, qty: i.lotSize, unit: 'pcs' }));
   g.packing.forEach((p) => add(p, { date: p.packingDate, department: 'Packing', txType: 'Packing → Finished Goods', module: 'packing', description: `${p.totalCartons} cartons · ${r3(p.totalCbm)} CBM`, qty: p.totalQty, unit: 'pcs' }));
   g.shipments.forEach((s) => {
@@ -171,6 +173,7 @@ function openItems(g, q, withMoney) {
   const push = (type, ref, detail, amount) => items.push({ type, ref, detail, ...(withMoney && amount !== undefined ? { amount: r2(amount) } : {}) });
   g.debits.filter((d) => d.status === 'Raised').forEach((d) => push('Unresolved fabric debit note', d.refNo, `${d.reason} – ${d.debitTo}`, d.amount));
   g.returns.filter((r) => r.status === 'Returned').forEach((r) => push('Fabric return not accepted', r.refNo, `${r.returnType} ${r.qty} ${r.unit}`, r.amount));
+  g.allocations.filter((a) => a.status === 'Allocated').forEach((a) => push('Fabric reserved, not issued', a.refNo, `${a.totalRolls} roll(s), ${r3(a.totalQty)} ${a.unit} held for ${a.cuttingTable || 'cutting'}`));
   g.fabric.filter((b) => num(b.pendingReceipt) > 0.0005).forEach((b) => push('Fabric PO pending receipt', b.refNo, `${r3(b.pendingReceipt)} ${b.unit} of ${b.bookedQty} not received (PO ${b.supplierPoNo || '—'})`, num(b.pendingReceipt) * num(b.rate)));
   g.trims.filter((t) => num(t.bookingQty) - num(t.receivedQty) > 0).forEach((t) => push('Trim PO pending receipt', t.refNo, `${t.item}: ${num(t.bookingQty) - num(t.receivedQty)} ${t.unit} not received`));
   if (q.packed - q.shipped > 0) push('Finished goods not shipped', g.job.jobNo, `${q.packed - q.shipped} pcs packed, in the finished goods store`);
@@ -208,7 +211,7 @@ async function reconcile(g, rows, add, withMoney, isMain = false) {
   const invoiced = r2(sum(g.invoices, 'totalAmount')); const paid = r2(sum(g.payments, 'amount'));
   const ledgerCost = r2(sum(R, 'costImpact')); const ledgerRevenue = r2(sum(R, 'revenueImpact'));
   const booking = {
-    received: r3(sum(g.fabric, 'receivedQty')), issued: r3(sum(g.fabric, 'issuedQty')), netIssued: r3(sum(g.fabric, 'issuedQty') - sum(g.fabric, 'returnedFromCuttingQty')),
+    received: r3(sum(g.fabric, 'receivedQty')), issued: r3(sum(g.fabric, 'issuedQty')), reserved: r3(sum(g.fabric, 'reservedQty')), netIssued: r3(sum(g.fabric, 'issuedQty') - sum(g.fabric, 'returnedFromCuttingQty')),
     balance: r3(sum(g.fabric, 'balanceQty')), used: r3(sum(g.fabric, 'usedQty')),
   };
   const ck = (label, expected, actual, tol = 0.01) => ({ label, expected, actual, ok: Math.abs(num(expected) - num(actual)) <= tol });
@@ -216,6 +219,7 @@ async function reconcile(g, rows, add, withMoney, isMain = false) {
   const checks = [
     ck('Fabric received = inward + transfer-in transactions', booking.received, received, 0.002),
     ck('Fabric issued = issue transactions', booking.issued, issued, 0.002),
+    ck('Fabric reserved = open reservation transactions', booking.reserved, r3(sum(fab('Fabric Reservation'), 'qty')), 0.002),
     ck('Fabric store balance = received − returned to supplier ± count adjustments − issued + returned from cutting', booking.balance, r3(received - retSupplierBooking + adjusted - issued + retStore), 0.002),
     le('Fabric used in cutting ≤ net issued', used, booking.netIssued),
     le('Sewn ≤ cut', q.sewn, q.cut), le('Finished ≤ sewn', q.finished, q.sewn), le('Packed (finished goods in) ≤ finished', q.packed, q.finished),
@@ -232,7 +236,7 @@ async function reconcile(g, rows, add, withMoney, isMain = false) {
   return {
     jobNo: j.jobNo, isMain, jobType: j.jobType, poNo: j.poNo, status: j.status, orderQty: num(j.orderQty), unitPrice: j.unitPrice, closedAt: j.closedAt, closedByName: j.closedByName,
     transactions: R.length,
-    fabric: { unit: g.fabric[0]?.unit || g.forecasts[0]?.unit || '', booked: r3(sum(g.fabric, 'bookedQty')), forecastReceived: r3(sum(g.forecasts, 'receivedQty')), received, pendingReceipt: r3(sum(g.fabric, 'pendingReceipt')), returnedToSupplier: r3(sum(returns.filter((r) => r.returnType === RETURN_TO_SUPPLIER), 'qty')), adjusted, issued, returnedFromCutting: retStore, netIssued: booking.netIssued, usedInCutting: used, consumed: booking.used, storeBalance: booking.balance },
+    fabric: { unit: g.fabric[0]?.unit || g.forecasts[0]?.unit || '', booked: r3(sum(g.fabric, 'bookedQty')), forecastReceived: r3(sum(g.forecasts, 'receivedQty')), received, pendingReceipt: r3(sum(g.fabric, 'pendingReceipt')), returnedToSupplier: r3(sum(returns.filter((r) => r.returnType === RETURN_TO_SUPPLIER), 'qty')), adjusted, issued, returnedFromCutting: retStore, reserved: booking.reserved, netIssued: booking.netIssued, usedInCutting: used, consumed: booking.used, storeBalance: booking.balance },
     debits: { count: g.debits.length, recovery: r2(-sum(g.debits.filter((d) => ['Accepted', 'Adjusted'].includes(d.status) && num(d.costImpact) < 0), 'costImpact')), charges: r2(sum(g.debits.filter((d) => ['Accepted', 'Adjusted'].includes(d.status) && num(d.costImpact) > 0), 'costImpact')), open: g.debits.filter((d) => d.status === 'Raised').length },
     production: {
       ...q, finishedGoodsBalance: q.packed - q.shipped, balanceToShip: Math.max(num(j.orderQty) - q.shipped, 0),

@@ -103,7 +103,9 @@ export const fabricBooking = {
     calc('netReceivedQty', 'Net Received'), calc('netIssuedQty', 'Net Issued'),
     calc('debitRecovery', 'Supplier Debit Notes', { hint: 'Accepted / adjusted debit notes – reduce the fabric cost' }),
     calc('bookingBalance', 'Booking Balance', { section: 'Balance' }), calc('pendingReceipt', 'Pending Receipt'),
-    calc('balanceQty', 'Store Balance', { list: true }), calc('excessQty', 'Excess Qty'), calc('shortageQty', 'Shortage Qty', { list: true }),
+    calc('balanceQty', 'Store Balance', { list: true }),
+    calc('reservedQty', 'Reserved for Cutting', { hint: 'Fabric allocations not yet issued – held in store, not issued' }), calc('freeQty', 'Free Stock (balance − reserved)'),
+    calc('excessQty', 'Excess Qty'), calc('shortageQty', 'Shortage Qty', { list: true }),
     calc('rejectedQty', 'Rejected Qty'), calc('receivedPct', 'Received %'),
     calc('bookingValue', 'Booking Value'), calc('actualValue', 'Received Value'),
     calc('closureVerdict', 'Closure Verdict', { type: 'text', list: true }),
@@ -121,6 +123,7 @@ export const fabricBooking = {
     return {
       baseQty: req.baseQty, totalLossPct: req.totalLossPct, requiredQty: req.requiredQty,
       bookingBalance: bal.bookingBalance, pendingReceipt: bal.pendingReceipt, balanceQty: bal.balanceQty, netReceivedQty: bal.netReceivedQty, netIssuedQty: bal.netIssuedQty,
+      freeQty: round(bal.balanceQty - num(d.reservedQty), 3),
       excessQty: bal.excessQty, shortageQty: bal.shortageQty, rejectedQty: bal.rejectedQty, receivedPct: bal.receivedPct,
       bookingValue: round(num(d.bookedQty) * num(d.rate)), actualValue: round(num(d.receivedQty) * num(d.rate)),
       closureVerdict: d.status === 'Fabric Job Closed' ? 'CLOSED' : bal.closureVerdict,
@@ -323,6 +326,7 @@ export const fabricReceipt = {
 /* ------------------------------ Fabric Allocation (roll-wise issue to cutting) ------------------------------ */
 export const fabricAllocation = {
   key: 'fabricAllocation', model: 'FabricAllocation', title: 'Fabric Allocation (Issue to Cutting)', singular: 'Fabric Allocation', group: 'Materials', icon: 'Split',
+  // 'Allocated' reserves the rolls for cutting (held, not issued); 'Issued to Cutting' issues them
   department: 'Fabric Department', prefix: 'FA', jobLinked: true, stage: 'fabric',
   ...flow(['Allocated', 'Issued to Cutting'], { Allocated: ['Cancelled'] }), defaultStatus: 'Allocated',
   fields: [

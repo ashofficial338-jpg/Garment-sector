@@ -337,6 +337,8 @@ export async function computeStages(g) {
   if (openDebits.length) blockers.push(`${openDebits.length} fabric debit note(s) not settled (${openDebits.map((d) => d.refNo).join(', ')})`);
   const openReturns = g.returns.filter((r) => r.status === 'Returned');
   if (openReturns.length) blockers.push(`${openReturns.length} fabric return(s) not accepted (${openReturns.map((r) => r.refNo).join(', ')})`);
+  const openReservations = g.allocations.filter((a) => a.status === 'Allocated');
+  if (openReservations.length) blockers.push(`${openReservations.length} fabric reservation(s) not issued or cancelled (${openReservations.map((a) => a.refNo).join(', ')})`);
   if (isMain) {
     g.subJobs.filter((s) => s.status !== 'Closed').forEach((s) => blockers.push(`Sub job ${s.jobNo} is not closed`));
   } else {

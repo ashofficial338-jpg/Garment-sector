@@ -146,7 +146,11 @@ await call('POST', '/m/sewing', { job: job.jobNo, entryDate: '2026-10-08', line:
 ok(true, 'sewing above cut qty blocked');
 const sew = await call('POST', '/m/sewing', { job: job.jobNo, entryDate: '2026-10-08', line: 'Line 1', operators: 40, sam: 6.5, workingMinutes: 480, targetQty: 1800, manualOutput: 10000, checkedQty: 10000, defects: 250 });
 ok(sew.efficiencyPct === Math.round(10000 * 6.5 / (40 * 480) * 10000) / 100 && sew.dhu === 2.5, `sewing efficiency ${sew.efficiencyPct}% DHU ${sew.dhu}`);
-await call('POST', '/m/finishing', { job: job.jobNo, entryDate: '2026-10-12', inputQty: 10000, passedQty: 9950, rejection: 50 });
+await call('POST', '/m/finishing', { job: job.jobNo, entryDate: '2026-10-12', inputQty: 10000, passedQty: 9950, rejection: 50, needleCheckedQty: 9900, needleFailQty: 2 }, [400]);
+ok(true, 'only needle-detector cleared pieces can pass');
+await call('POST', '/m/finishing', { job: job.jobNo, entryDate: '2026-10-12', inputQty: 10000, passedQty: 9950, rejection: 0, rework: 0, needleCheckedQty: 10000, needleFailQty: 2 }, [400]);
+ok(true, 'metal-detected pieces must be rejected or reworked');
+await call('POST', '/m/finishing', { job: job.jobNo, entryDate: '2026-10-12', inputQty: 10000, passedQty: 9950, rejection: 50, ironedQty: 10000, needleCheckedQty: 10000, needleFailQty: 2 });
 const pk = await call('POST', '/m/packing', { job: job.jobNo, packingDate: '2026-10-14', rows: [{ color: 'Navy', ratio: 'S:2,M:4,L:4', cartonFrom: 1, cartonTo: 995, netWtPerCarton: 8, grossWtPerCarton: 9, length: 60, width: 40, height: 30 }] });
 ok(pk.totalQty === 9950 && pk.totalCartons === 995 && Math.abs(pk.totalCbm - 71.64) < 0.01, `packing list: ${pk.totalCartons} ctns, ${pk.totalQty} pcs, ${pk.totalCbm} CBM`);
 await call('POST', `/m/packing/${pk._id}/status`, { status: 'Packed' });
@@ -403,6 +407,10 @@ ok(al.rolls[0].lotNo === 'L-55' && al.totalQty === 600, 'roll allocated with its
 await call('POST', '/m/fabricAllocation', { job: bj.jobNo, booking: bfb._id, allocationDate: '2026-10-05', rolls: [{ rollNo: 'R1', qty: 1 }] }, [400]);
 ok(true, 'a roll cannot be allocated beyond its quantity');
 bk = await call('GET', `/m/fabricBooking/${bfb._id}`);
+ok(bk.reservedQty === 600 && !bk.issuedQty && bk.freeQty === bk.balanceQty - 600, `allocated rolls are reserved, not issued (reserved ${bk.reservedQty}, issued ${bk.issuedQty}, free ${bk.freeQty})`);
+await call('POST', `/m/fabricAllocation/${al._id}/status`, { status: 'Issued to Cutting' });
+bk = await call('GET', `/m/fabricBooking/${bfb._id}`);
+ok(bk.issuedQty === 600 && !bk.reservedQty, 'issuing the reservation moves it to issued');
 await call('PUT', `/m/fabricBooking/${bfb._id}`, { receivedQty: 5, issuedQty: 1 });
 const bk2 = await call('GET', `/m/fabricBooking/${bfb._id}`);
 ok(bk.issuedQty === 600 && bk2.receivedQty === 1200 && bk2.issuedQty === 600, 'received / issued come from rolls and cannot be typed over');

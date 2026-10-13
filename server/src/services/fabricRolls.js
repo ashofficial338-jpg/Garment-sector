@@ -18,7 +18,7 @@ export const transfersInto = (bookingIds) => runWithUnit(ALL_UNITS, () => models
 
 /**
  * Quantities a booking's transactions dictate: receipts (rolls) plus transfers in → received / inspected / approved,
- * allocations → issued, fabric returns → returned to supplier / from cutting, supplier debit notes → recovery.
+ * allocations issued to cutting → issued (still 'Allocated' → reserved), fabric returns → returned to supplier / from cutting, supplier debit notes → recovery.
  * receipt / allocation are null when the booking has none (its typed quantities then stand).
  */
 export async function rollTotals(bookingId) {
@@ -30,6 +30,8 @@ export async function rollTotals(bookingId) {
     models.fabricDebit.find({ booking: bookingId, isDeleted: false, debitTo: 'Supplier', status: { $in: ['Accepted', 'Adjusted'] } }).lean(),
   ]);
   const tin = round(sum(transfers, 'qty'), 3); // transferred fabric arrives inspected and approved
+  // an allocation still 'Allocated' is a reservation: the rolls are held for cutting but not yet issued
+  const issued = allocations.filter((a) => a.status === 'Issued to Cutting');
   return {
     // without roll receipts the booking's typed quantities stand (a completed transfer adds to them when it posts)
     receipt: receipts.length ? {
@@ -37,8 +39,9 @@ export async function rollTotals(bookingId) {
       inspectedQty: round(sum(receipts.filter((r) => ['Inspected', 'Approved'].includes(r.status)), 'totalQty') + tin, 3),
       approvedQty: round(sum(receipts.filter((r) => r.status === 'Approved'), 'passedQty') + tin, 3),
     } : null,
-    allocation: allocations.length ? { issuedQty: round(sum(allocations, 'totalQty'), 3) } : null,
+    allocation: allocations.length ? { issuedQty: round(sum(issued, 'totalQty'), 3) } : null,
     returns: {
+      reservedQty: round(sum(allocations.filter((a) => a.status === 'Allocated'), 'totalQty'), 3),
       returnedToSupplierQty: round(sum(returns.filter((r) => r.returnType === RETURN_TO_SUPPLIER), 'qty'), 3),
       returnedFromCuttingQty: round(sum(returns.filter((r) => r.returnType === RETURN_TO_STORE), 'qty'), 3),
       adjustedQty: round(sum(returns.filter((r) => r.returnType === ADJUST_EXCESS), 'qty') - sum(returns.filter((r) => r.returnType === ADJUST_SHORT), 'qty'), 3),

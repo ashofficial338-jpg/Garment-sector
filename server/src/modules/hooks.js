@@ -534,6 +534,10 @@ export const hooks = {
     async beforeSave(ctx) {
       const d = ctx.data;
       guard(ctx, num(d.passedQty) + num(d.rejection) <= num(d.inputQty), 'Passed + rejected cannot exceed finishing input');
+      guard(ctx, num(d.ironedQty) <= num(d.inputQty) && num(d.needleCheckedQty) <= num(d.inputQty), 'Ironed / needle-checked quantity cannot exceed finishing input');
+      guard(ctx, num(d.needleFailQty) <= num(d.needleCheckedQty), 'Metal-detected pieces cannot exceed the pieces checked');
+      guard(ctx, num(d.needleFailQty) <= num(d.rejection) + num(d.rework), 'Metal-detected pieces must be rejected or sent for rework');
+      if (num(d.needleCheckedQty) > 0) guard(ctx, num(d.passedQty) <= num(d.needleCheckedQty) - num(d.needleFailQty), `Only needle-detector cleared pieces can pass (${num(d.needleCheckedQty) - num(d.needleFailQty)} cleared)`);
       const sewn = sum(await models.sewing.find({ job: ctx.job._id, isDeleted: false, status: { $ne: 'Rejected' } }).lean(), 'actualQty');
       const prev = sum(await others('finishing', ctx, { status: { $ne: 'Rejected' } }), 'inputQty');
       guard(ctx, prev + num(d.inputQty) <= sewn, `Finishing input (${prev + num(d.inputQty)}) exceeds sewing output (${sewn})`);
@@ -570,13 +574,15 @@ export const hooks = {
       requirePo(ctx.job, 'shipped');
       if (ctx.isCreate && !num(d.qty)) {
         // pull packing data automatically
+        // what is packed and not yet on an earlier shipment (quantity, cartons, weights and volume alike)
         const packs = await models.packing.find({ job: ctx.job._id, isDeleted: false }).lean();
-        const shipped = sum(await others('shipment', ctx, { status: { $ne: 'Cancelled' } }), 'qty');
-        d.qty = Math.max(sum(packs, 'totalQty') - shipped, 0);
-        d.cartons = d.cartons || sum(packs, 'totalCartons');
-        d.netWeight = d.netWeight || round(sum(packs, 'totalNetWeight'));
-        d.grossWeight = d.grossWeight || round(sum(packs, 'totalGrossWeight'));
-        d.cbm = d.cbm || round(sum(packs, 'totalCbm'), 3);
+        const earlier = await others('shipment', ctx, { status: { $ne: 'Cancelled' } });
+        const left = (pf, sf, dp = 2) => Math.max(round(sum(packs, pf) - sum(earlier, sf), dp), 0);
+        d.qty = left('totalQty', 'qty', 0);
+        d.cartons = d.cartons || left('totalCartons', 'cartons', 0);
+        d.netWeight = d.netWeight || left('totalNetWeight', 'netWeight');
+        d.grossWeight = d.grossWeight || left('totalGrossWeight', 'grossWeight');
+        d.cbm = d.cbm || left('totalCbm', 'cbm', 3);
         d.destination = d.destination || ctx.job.destination;
         if (!d.shipmentDate) d.shipmentDate = ctx.job.shipmentDate;
       }
