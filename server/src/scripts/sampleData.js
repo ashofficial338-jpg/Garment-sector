@@ -1441,7 +1441,9 @@ async function main() {
   const server = await startApi();
   log('\nBuilding sample dataset through the API…');
   const startedAt = new Date(Date.now() - 1000);
-  const { created, createdMasters, factory } = await buildDataset();
+  // a run that fails part-way still flags what it created, so the next run removes it instead of keeping it as live data
+  const built = await buildDataset().catch(async (e) => { await markSample(startedAt, {}).catch(() => {}); server.close(); throw e; });
+  const { created, createdMasters, factory } = built;
   await markSample(startedAt, createdMasters);
   log('\nChecking unit dashboards, reports, analytics and main job pages through the API…');
   const apiResult = await apiChecks();
