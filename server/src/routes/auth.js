@@ -77,18 +77,24 @@ r.post('/login', loginLimiter, asyncHandler(async (req, res) => {
   res.json({ accessToken: signAccess(user), user: await userPayload(user) });
 }));
 
+// "not signed in" is a normal answer here (every page load asks), so it is a 200 with no token, not a 401
+const noSession = (res, reason) => res.json({ accessToken: null, user: null, reason });
+
 r.post('/refresh', asyncHandler(async (req, res) => {
   const token = req.cookies?.[COOKIE];
-  if (!token) throw ApiError.unauthorized('No session');
+  if (!token) return noSession(res, 'No session');
   const session = await Session.findOne({ tokenHash: hash(token) });
   if (!session || session.revokedAt || session.expiresAt < new Date()) {
     // token reuse after rotation → revoke every session of that user
     if (session?.revokedAt) await Session.updateMany({ user: session.user, revokedAt: null }, { revokedAt: new Date() });
     res.clearCookie(COOKIE, { path: '/api/auth' });
-    throw ApiError.unauthorized('Session expired');
+    return noSession(res, 'Session expired');
   }
   const user = await User.findById(session.user).populate('role');
-  if (!user || !user.isActive || user.isDeleted) throw ApiError.unauthorized('Account disabled');
+  if (!user || !user.isActive || user.isDeleted) {
+    res.clearCookie(COOKIE, { path: '/api/auth' });
+    return noSession(res, 'Account disabled');
+  }
   const unit = allowedUnits(user).includes(session.unit) ? session.unit : undefined;
   const next = await issueRefresh(req, res, user, unit);
   session.revokedAt = new Date(); session.replacedBy = hash(next);

@@ -35,7 +35,12 @@ async function postRefresh(attempt = 0) {
 export async function refreshSession() {
   if (!refreshing) {
     refreshing = postRefresh()
-      .then((r) => { accessToken = r.data.accessToken; emit({ type: 'refreshed', user: r.data.user }); return r.data; })
+      .then((r) => {
+        if (!r.data?.accessToken) throw new Error(r.data?.reason || 'No session');
+        accessToken = r.data.accessToken;
+        emit({ type: 'refreshed', user: r.data.user });
+        return r.data;
+      })
       .finally(() => { refreshing = null; });
   }
   return refreshing;
