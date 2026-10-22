@@ -275,15 +275,16 @@ const JOBS = {
       costing: { trimCost: 0.18, cuttingCost: 0.05, sewingCost: 0.5, finishingCost: 0.09, packingCost: 0.06, labourCost: 0.05, factoryOverhead: 0.16, testingCost: 0.03, freightCost: 0.08, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
   ],
   U2: [
-    { key: 'U2-MAIN', flow: true, buyer: 'Bristol & Main Ltd', styleNo: 'BM-OX-140', product: "Men's Oxford Button-Down Shirt", garmentType: 'Shirt', poNo: 'BM-PO-77310', destination: 'Felixstowe', price: 8.9, qty: 6000, forecast: true,
+    { key: 'U2-MAIN', flow: true, buyer: 'Bristol & Main Ltd', styleNo: 'BM-OX-140', product: "Men's Oxford Button-Down Shirt", garmentType: 'Shirt', poNo: 'BM-PO-77310', destination: 'Felixstowe', price: 8.9, qty: 6000, forecast: true, closeMain: true,
       fabric: { fabricType: 'Cotton Oxford 40s', composition: '100% Cotton', gsm: 135, width: 58, color: 'Light Blue', unit: 'Meter', consumption: 1.6, wastagePct: 5, rate: 2.75 },
-      trims: WOVEN_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [56, 78, 64, 41], sam: 18.5, orderDays: -80, shipDays: 50,
+      trims: WOVEN_TRIMS, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [56, 78, 64, 41], sam: 18.5, orderDays: -80, shipDays: -3,
       costing: { trimCost: 0.29, accessoriesCost: 0.11, cuttingCost: 0.1, sewingCost: 1.45, finishingCost: 0.2, washingCost: 0.18, packingCost: 0.09, labourCost: 0.08, factoryOverhead: 0.32, testingCost: 0.05, freightCost: 0.16, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 },
-      forecastPlan: { supplier: 'Arvind Mills', supplierPoNo: 'AM/OX/26-1187', lotNo: 'OX-LB-5531', received: 10400, receivedDays: -58 },
+      // 10080 m received = exactly the three drops (1.6 m/pc + 5%) → fully allocated; every drop closes, then the main job
+      forecastPlan: { supplier: 'Arvind Mills', supplierPoNo: 'AM/OX/26-1187', lotNo: 'OX-LB-5531', received: 10080, receivedDays: -58 },
       subJobs: [
-        { qty: 3000, fabric: 5040, day: -56, ship: -8, ref: 'BM-PO-77310 drop 1', poNo: 'BM-PO-77310-D1', color: 'Light Blue', stage: 'readyToClose' },
-        { qty: 2000, fabric: 3360, day: -25, ship: -2, ref: 'BM-PO-77310 drop 2', poNo: 'BM-PO-77310-D2', color: 'Light Blue', stage: 'partShipped' },
-        { qty: 1000, fabric: 1700, day: -24, ship: 60, ref: 'BM-PO-77310 drop 3', poNo: 'BM-PO-77310-D3', color: 'Light Blue', stage: 'sewing' },
+        { qty: 3000, fabric: 5040, day: -56, ship: -8, ref: 'BM-PO-77310 drop 1', poNo: 'BM-PO-77310-D1', color: 'Light Blue', stage: 'closed' },
+        { qty: 2000, fabric: 3360, day: -50, ship: -12, ref: 'BM-PO-77310 drop 2', poNo: 'BM-PO-77310-D2', color: 'Light Blue', stage: 'closed' },
+        { qty: 1000, fabric: 1680, day: -44, ship: -4, ref: 'BM-PO-77310 drop 3', poNo: 'BM-PO-77310-D3', color: 'Light Blue', stage: 'closed' },
       ] },
     { key: 'U2-CHINO', buyer: 'Sakura Lifestyle KK', styleNo: 'SL-CH-205', product: "Women's Stretch Twill Chino", garmentType: 'Trouser', poNo: 'SLK-24-5582', destination: 'Yokohama', price: 9.4, qty: 4000, stage: 'closed',
       fabric: { fabricType: 'Stretch Cotton Twill 7 oz', composition: '98% Cotton 2% Elastane', gsm: 240, width: 57, color: 'Khaki', unit: 'Meter', consumption: 1.35, wastagePct: 5, rate: 3.4 },
@@ -1041,7 +1042,7 @@ async function buildDataset() {
     factory.attendance += await attendanceSheets(api, unit, staff[unit], counters.flowLog, FACTORY_FROM, day, counters);
     factory.payrolls.push(...await payrolls(api, unit, FACTORY_FROM, day, TODAY));
     // third-party pre-shipment inspection of an open job (a closed job takes no new costs), outsourced repair of held goods
-    const inspected = unit === 'U1' ? created.U1.find((x) => x.spec.key === 'U1-HOODIE')?.job.jobNo : subs2[1]?.jobNo;
+    const inspected = created[unit].find((x) => x.spec.key === (unit === 'U1' ? 'U1-HOODIE' : 'U2-BM-POLO'))?.job.jobNo;
     const held = unit === 'U1' ? created.U1.find((x) => x.spec.key === 'U1-SWEAT')?.job.jobNo : null;
     factory.expenses.push(...await factoryExpenses(api, unit, day, TODAY, { inspected: inspected ? { jobNo: inspected, day: -5 } : null, repaired: held ? { jobNo: held, day: -3 } : null }));
   }
