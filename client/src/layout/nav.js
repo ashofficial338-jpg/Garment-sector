@@ -71,6 +71,7 @@ export const NAV = [
   ] },
   { group: 'Insights', items: [
     { to: '/analytics', label: 'Management Analytics', icon: 'ChartNoAxesCombined', perm: ['analytics'] },
+    { to: '/financial-reports', label: 'Financial Reports (PDF / Excel)', icon: 'FileSpreadsheet', perm: ['analytics'] },
     { to: '/reports', label: 'Report Center', icon: 'FileBarChart', perm: ['reports'] },
     { to: '/factory/integrity', label: 'Data Integrity Checks', icon: 'ShieldCheck', perm: ['factoryReports'] },
     { to: '/notifications', label: 'Notifications', icon: 'Bell' },

@@ -4,12 +4,12 @@ import autoTable from 'jspdf-autotable';
 import { fmtDate, fmtNum, fmtMoney } from './format.js';
 import { api } from '../api.js';
 
-const BRAND = [79, 70, 229];
+export const BRAND = [79, 70, 229];
 const company = () => {
   try { return JSON.parse(sessionStorage.getItem('company') || 'null') || { name: 'StitchFlow Garments' }; } catch { return { name: 'StitchFlow Garments' }; }
 };
 
-function header(doc, title, sub) {
+export function header(doc, title, sub) {
   const w = doc.internal.pageSize.getWidth();
   doc.setFillColor(...BRAND); doc.rect(0, 0, w, 26, 'F');
   doc.setTextColor(255); doc.setFont('helvetica', 'bold'); doc.setFontSize(15);
@@ -24,7 +24,7 @@ function header(doc, title, sub) {
   return 34;
 }
 
-function footer(doc) {
+export function footer(doc) {
   const n = doc.getNumberOfPages();
   for (let i = 1; i <= n; i += 1) {
     doc.setPage(i);
@@ -45,7 +45,7 @@ function kv(doc, y, pairs) {
   return doc.lastAutoTable.finalY + 4;
 }
 
-const table = (doc, y, head, body, opts = {}) => {
+export const table = (doc, y, head, body, opts = {}) => {
   autoTable(doc, { startY: y, head: [head], body, theme: 'grid', headStyles: { fillColor: BRAND, fontSize: 8.5 }, styles: { fontSize: 8.5, cellPadding: 2 }, ...opts });
   return doc.lastAutoTable.finalY + 6;
 };

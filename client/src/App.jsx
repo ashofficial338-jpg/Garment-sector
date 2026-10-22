@@ -23,6 +23,7 @@ const Framework = lazy(() => import('./pages/Framework.jsx'));
 const Masters = lazy(() => import('./pages/Masters.jsx'));
 const Profit = lazy(() => import('./pages/Profit.jsx'));
 const Analytics = lazy(() => import('./pages/Analytics.jsx'));
+const FinancialReports = lazy(() => import('./pages/FinancialReports.jsx'));
 const StockReports = lazy(() => import('./pages/StockReports.jsx'));
 const OrderTracking = lazy(() => import('./pages/OrderTracking.jsx'));
 const JobClosureReport = lazy(() => import('./pages/JobClosureReport.jsx'));
@@ -52,6 +53,7 @@ export default function App() {
           <Route path="reports" element={<Reports />} />
           <Route path="profit" element={<Profit />} />
           <Route path="analytics" element={<Analytics />} />
+          <Route path="financial-reports" element={<FinancialReports />} />
           <Route path="stock" element={<StockReports />} />
           <Route path="factory" element={<FactoryCenter />} />
           <Route path="factory/:tab" element={<FactoryCenter />} />
