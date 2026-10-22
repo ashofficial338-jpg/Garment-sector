@@ -170,7 +170,9 @@ const CONTACTS = {
   'Maison Lumière': [['Claire Dubois', 'Buyer'], ['Luc Martin', 'Logistics']], 'Kiwi Kids Ltd': [['Aroha Smith', 'Product Manager']], 'Pacific Coast Apparel LLC': [['Dana Brooks', 'Merchandiser']],
   'Bristol & Main Ltd': [['Oliver Grant', 'Head of Menswear'], ['Priya Nair', 'Compliance']], 'Sakura Lifestyle KK': [['Yuki Tanaka', 'Buyer'], ['Ken Mori', 'QC']], 'Hamburg Outdoor GmbH': [['Lena Vogel', 'Category Buyer']],
 };
-const STYLES = ['NA-CT-501', 'KK-TS-14', 'ML-PQ-77', 'UT-HD-330', 'NA-LS-610', 'KK-SH-22', 'PCA-TK-08', 'UT-SW-215', 'BM-OX-140', 'SL-CH-205', 'HO-SH-415', 'BM-LT-118', 'SL-BL-090', 'HO-OS-220', 'UT-JG-410', 'SL-DR-301'];
+const STYLES = ['NA-CT-501', 'KK-TS-14', 'ML-PQ-77', 'UT-HD-330', 'NA-LS-610', 'KK-SH-22', 'PCA-TK-08', 'UT-SW-215', 'BM-OX-140', 'SL-CH-205', 'HO-SH-415', 'BM-LT-118', 'SL-BL-090', 'HO-OS-220', 'UT-JG-410', 'SL-DR-301',
+  'PCA-PL-15', 'KK-TS-19', 'NA-HD-640', 'ML-SW-310', 'PCA-SH-44', 'UT-TS-118', 'UT-PL-120', 'KK-LS-30', 'NA-TK-655', 'ML-KT-40', 'PCA-SW-21',
+  'HO-OX-150', 'BM-CH-210', 'SL-SH-120', 'BM-FL-300', 'HO-TR-500', 'SL-BL-095', 'BM-PL-90', 'SL-TS-410', 'BM-SH-160', 'SL-OX-220', 'HO-BL-20', 'SL-JK-501'];
 const MASTER_SAMPLES = [
   ...STYLES.map((name) => ['Style', name]),
   ['Costing Template', 'Knit top – basic (fabric KG, CMT, 12% margin)'], ['Costing Template', 'Woven shirt (fabric metre, wash, 12% margin)'], ['Costing Template', 'Bottoms (fabric metre, zip, wash, 11% margin)'],
@@ -311,6 +313,55 @@ const JOBS = {
       costing: { trimCost: 0.25, cuttingCost: 0.07, sewingCost: 0.9, finishingCost: 0.13, packingCost: 0.08, labourCost: 0.06, factoryOverhead: 0.21, testingCost: 0.04, freightCost: 0.11, commissionPct: 3, financeCostPct: 1, adminOverheadPct: 2, profitMarginPct: 12 } },
   ],
 };
+
+/**
+ * More regular jobs so each unit carries 20+ parent jobs: each takes the fabric, trims, sizes and costing of an
+ * existing style family (`from`) with its own buyer, style, PO, quantity, dates and stage. The mix adds delayed
+ * deliveries (ship date passed, still in production), part-paid invoices and loss-making jobs (CMT / washing
+ * overruns booked above the cost sheet, buyer claims deducted on the invoice).
+ */
+const OVERRUN = (cmt, wash, fin, pack) => [['Sewing / CMT', cmt], ...(wash ? [['Washing', wash]] : []), ['Finishing', fin], ['Packing', pack]];
+const MORE = {
+  U1: [
+    { from: 'U1-POLO', key: 'U1-PCA-POLO', buyer: 'Pacific Coast Apparel LLC', styleNo: 'PCA-PL-15', product: "Men's Pique Polo", poNo: 'PCA-PO-29840', destination: 'Long Beach', qty: 3800, color: 'White', stage: 'closed', orderDays: -125, shipDays: -35, payFull: true },
+    { from: 'U1-KIDS-TEE', key: 'U1-KK-STRIPE', buyer: 'Kiwi Kids Ltd', styleNo: 'KK-TS-19', product: 'Kids Striped Crew Tee', poNo: 'KK-61702', qty: 7200, color: 'Mint', stage: 'closed', orderDays: -118, shipDays: -30, payFull: true },
+    { from: 'U1-HOODIE', key: 'U1-NOR-ZIP', buyer: 'Nordic Apparel AB', styleNo: 'NA-HD-640', product: "Men's Zip-Through Hoodie", poNo: 'NOR-PO-5066', destination: 'Gothenburg', qty: 2600, color: 'Black', stage: 'closed', orderDays: -120, shipDays: -28, payFull: true,
+      expenses: OVERRUN(2.95, 0.6, 0.38, 0.14), claim: { amount: 1530, reason: 'late delivery penalty – shipped 9 days after the PO date, 5% of FOB value' } },
+    { from: 'U1-SWEAT', key: 'U1-ML-SWEAT', buyer: 'Maison Lumière', styleNo: 'ML-SW-310', product: "Women's Boxy Sweatshirt", poNo: 'ML-2026-198', destination: 'Le Havre', qty: 2800, color: 'Oatmeal', stage: 'accountsPending', orderDays: -100, shipDays: -10, payPart: 0.5 },
+    { from: 'U1-SHORTS', key: 'U1-PCA-SHORTS', buyer: 'Pacific Coast Apparel LLC', styleNo: 'PCA-SH-44', product: "Women's Lounge Shorts", poNo: 'PCA-PO-30105', destination: 'Long Beach', qty: 5000, color: 'Sage', stage: 'accountsPending', orderDays: -98, shipDays: -8,
+      expenses: OVERRUN(0.92, 0, 0.16, 0.09) },
+    { from: 'U1-KIDS-TEE', key: 'U1-UT-GRAPHIC', buyer: 'Urban Threads Inc', styleNo: 'UT-TS-118', product: 'Unisex Graphic Tee', poNo: 'UTI-91355', destination: 'Los Angeles', qty: 9000, sizes: SIZES_ADULT, ratio: RATIO_ADULT, poms: [52, 71, 20, 18], color: 'White', stage: 'shipped', orderDays: -88, shipDays: -5 },
+    { from: 'U1-POLO', key: 'U1-UT-POLO', buyer: 'Urban Threads Inc', styleNo: 'UT-PL-120', product: 'Unisex Jersey Polo', poNo: 'UTI-91512', destination: 'Los Angeles', qty: 3200, color: 'Forest Green', stage: 'sewing', orderDays: -72, shipDays: -3 },
+    { from: 'U1-HENLEY', key: 'U1-KK-LS', buyer: 'Kiwi Kids Ltd', styleNo: 'KK-LS-30', product: 'Kids Long Sleeve Waffle Tee', poNo: 'KK-61955', destination: 'Sydney', qty: 6400, sizes: SIZES_KIDS, ratio: RATIO_KIDS, poms: [37, 47, 40, 15], color: 'Rust', stage: 'quality', orderDays: -62, shipDays: 15 },
+    { from: 'U1-TANK', key: 'U1-NOR-VEST', buyer: 'Nordic Apparel AB', styleNo: 'NA-TK-655', product: "Men's Rib Vest", poNo: 'NOR-PO-5240', destination: 'Gothenburg', qty: 4500, sizes: SIZES_ADULT, ratio: RATIO_ADULT, color: 'Grey Marl', stage: 'cutting', orderDays: -44, shipDays: 38 },
+    { from: 'U1-KIDS-TEE', key: 'U1-ML-KIDS', buyer: 'Maison Lumière', styleNo: 'ML-KT-40', product: 'Kids Organic Cotton Tee', poNo: 'ML-2026-287', destination: 'Le Havre', qty: 5000, color: 'Lemon', stage: 'fabricPending', orderDays: -26, shipDays: 66 },
+    { from: 'U1-SWEAT', key: 'U1-PCA-FLEECE', hold: 'Approval – lab dip re-submission for Burgundy pending with the buyer', buyer: 'Pacific Coast Apparel LLC', styleNo: 'PCA-SW-21', product: 'Fleece Pullover', poNo: 'PCA-PO-31014', destination: 'Long Beach', qty: 2400, color: 'Burgundy', stage: 'planning', orderDays: -9, shipDays: 92 },
+  ],
+  U2: [
+    { from: 'U2-MAIN', key: 'U2-HOG-OXFORD', buyer: 'Hamburg Outdoor GmbH', styleNo: 'HO-OX-150', product: "Men's Oxford Shirt", poNo: 'HOG-4302-26', destination: 'Hamburg', qty: 3500, color: 'White', stage: 'closed', orderDays: -124, shipDays: -34, payFull: true },
+    { from: 'U2-CHINO', key: 'U2-BM-CHINO', buyer: 'Bristol & Main Ltd', styleNo: 'BM-CH-210', product: "Men's Slim Chino", poNo: 'BM-PO-76980', destination: 'Felixstowe', qty: 4200, sizes: ['30', '32', '34', '36'], ratio: '30:2,32:3,34:3,36:2', color: 'Navy', stage: 'closed', orderDays: -120, shipDays: -31, payFull: true },
+    { from: 'U2-POPLIN', key: 'U2-SLK-POPLIN', buyer: 'Sakura Lifestyle KK', styleNo: 'SL-SH-120', product: "Women's Poplin Shirt", poNo: 'SLK-24-5410', destination: 'Yokohama', qty: 3000, sizes: ['XS', 'S', 'M', 'L'], ratio: 'XS:2,S:3,M:3,L:2', color: 'Pale Pink', stage: 'closed', orderDays: -116, shipDays: -27, payFull: true,
+      expenses: OVERRUN(2.4, 0.5, 0.35, 0.12), claim: { amount: 994, reason: 'buyer claim – shade variation on 140 pcs found at destination, deducted at FOB' } },
+    { from: 'U2-FLANNEL', key: 'U2-BM-FLANNEL', buyer: 'Bristol & Main Ltd', styleNo: 'BM-FL-300', product: "Men's Flannel Shirt", poNo: 'BM-PO-77120', destination: 'Felixstowe', qty: 2000, color: 'Blue Check', stage: 'accountsPending', orderDays: -104, shipDays: -12, payPart: 0.3 },
+    { from: 'U2-CHINO', key: 'U2-HOG-CARGO', buyer: 'Hamburg Outdoor GmbH', styleNo: 'HO-TR-500', product: "Men's Cargo Trouser", poNo: 'HOG-4356-26', destination: 'Hamburg', qty: 2600, sizes: ['30', '32', '34', '36'], ratio: '30:2,32:3,34:3,36:2', color: 'Olive', stage: 'accountsPending', orderDays: -100, shipDays: -9,
+      expenses: OVERRUN(2.9, 0.8, 0.3, 0.12) },
+    { from: 'U2-BLOUSE', key: 'U2-SLK-PRINT', buyer: 'Sakura Lifestyle KK', styleNo: 'SL-BL-095', product: "Women's Printed Viscose Blouse", poNo: 'SLK-24-5598', qty: 2800, color: 'Navy Floral', stage: 'shipped', orderDays: -86, shipDays: -4 },
+    { from: 'U2-FLOW', key: 'U2-BM-POLO', buyer: 'Bristol & Main Ltd', styleNo: 'BM-PL-90', product: "Men's Pique Polo", poNo: 'BM-PO-77355', destination: 'Felixstowe', qty: 4000, color: 'Bottle Green', stage: 'packing', orderDays: -68, shipDays: 7 },
+    { from: 'U2-LOUNGE', key: 'U2-SLK-TEE', buyer: 'Sakura Lifestyle KK', styleNo: 'SL-TS-410', product: "Women's Basic Crew Tee", poNo: 'SLK-24-5690', destination: 'Yokohama', qty: 5500, sizes: ['XS', 'S', 'M', 'L'], ratio: 'XS:2,S:3,M:3,L:2', color: 'Off White', stage: 'quality', orderDays: -62, shipDays: 16 },
+    { from: 'U2-POPLIN', key: 'U2-BM-LINEN', buyer: 'Bristol & Main Ltd', styleNo: 'BM-SH-160', product: "Men's Linen-Look Shirt", poNo: 'BM-PO-77290', destination: 'Felixstowe', qty: 2400, color: 'Sand', stage: 'sewing', orderDays: -72, shipDays: -4 },
+    { from: 'U2-MAIN', key: 'U2-SLK-OXFORD', buyer: 'Sakura Lifestyle KK', styleNo: 'SL-OX-220', product: "Women's Oxford Shirt", poNo: 'SLK-24-5734', destination: 'Yokohama', qty: 3000, sizes: ['XS', 'S', 'M', 'L'], ratio: 'XS:2,S:3,M:3,L:2', color: 'Pink Stripe', stage: 'cutting', orderDays: -42, shipDays: 36, partialFabric: 0.9 },
+    { from: 'U2-BLOUSE', key: 'U2-HOG-UTILITY', buyer: 'Hamburg Outdoor GmbH', styleNo: 'HO-BL-20', product: "Women's Utility Shirt", poNo: 'HOG-4505-26', destination: 'Hamburg', qty: 1800, color: 'Khaki', stage: 'fabricPending', orderDays: -20, shipDays: 72 },
+    { from: 'U2-FLANNEL', key: 'U2-SLK-SHACKET', buyer: 'Sakura Lifestyle KK', styleNo: 'SL-JK-501', product: "Women's Flannel Shacket", poNo: 'SLK-24-5788', destination: 'Yokohama', qty: 1500, sizes: ['XS', 'S', 'M', 'L'], ratio: 'XS:2,S:3,M:3,L:2', color: 'Grey Check', stage: 'planning', orderDays: -7, shipDays: 98 },
+  ],
+};
+// the base family's own commercial / flow settings stay with it – each extra job sets its own
+const FAMILY_ONLY = ['key', 'poNo', 'stage', 'forecast', 'forecastPlan', 'subJobs', 'closeMain', 'expenses', 'payFull', 'payPart', 'partialFabric', 'hold', 'claim', 'flow', 'countAdjust', 'qualityHold'];
+for (const unit of ['U1', 'U2']) {
+  for (const { from, color, ...own } of MORE[unit]) {
+    const base = Object.fromEntries(Object.entries(JOBS[unit].find((s) => s.key === from)).filter(([k]) => !FAMILY_ONLY.includes(k)));
+    JOBS[unit].push({ ...base, ...own, fabric: { ...base.fabric, color } });
+  }
+}
 
 /**
  * Repeat buyers place the same style again: an ADVANCE job is opened from the new costing / quotation before
